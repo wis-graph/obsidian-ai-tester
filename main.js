@@ -9,7 +9,27 @@ const DEFAULT_SETTINGS = {
   openai: {
     apiKey: "",
     baseUrl: "https://api.openai.com/v1",
-    model: "gpt-4o"
+    model: "gpt-5.2"
+  },
+  gemini: {
+    apiKey: "",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+    model: "gemini-3-pro"
+  },
+  grok: {
+    apiKey: "",
+    baseUrl: "https://api.x.ai/v1",
+    model: "grok-4.1"
+  },
+  glm: {
+    apiKey: "",
+    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    model: "glm-4.7"
+  },
+  kimi: {
+    apiKey: "",
+    baseUrl: "https://api.moonshot.cn/v1",
+    model: "moonshot-v1-8k"
   }
 };
 const DEFAULT_BLOCK_CONFIG = {
@@ -109,22 +129,16 @@ class OllamaProvider {
     }
   }
 }
-class OpenAIProvider {
-  constructor(settings) {
-    this.id = "openai";
-    this.name = "OpenAI";
+class OpenAICompatibleProvider {
+  constructor(id, name, settings, modelPrefixes = []) {
+    this.id = id;
+    this.name = name;
     this.settings = settings;
+    this.modelPrefixes = modelPrefixes;
   }
   async fetchModels() {
     if (!this.settings.apiKey) {
-      return {
-        models: [
-          { id: "gpt-4o", name: "GPT-4o" },
-          { id: "gpt-4o-mini", name: "GPT-4o mini" },
-          { id: "gpt-4-turbo", name: "GPT-4 Turbo" },
-          { id: "gpt-3.5-turbo", name: "GPT-3.5 Turbo" }
-        ]
-      };
+      return { models: [{ id: this.settings.model, name: this.settings.model }] };
     }
     try {
       const response = await fetch(`${this.settings.baseUrl}/models`, {
@@ -136,15 +150,21 @@ class OpenAIProvider {
         throw new Error(`Failed to fetch models: ${response.status}`);
       }
       const data = await response.json();
+      let models = data.data || [];
+      if (this.modelPrefixes.length > 0) {
+        models = models.filter(
+          (m) => this.modelPrefixes.some((prefix) => m.id.toLowerCase().startsWith(prefix.toLowerCase()))
+        );
+      }
       return {
-        models: data.data.filter((m) => m.id.startsWith("gpt-")).map((m) => ({
+        models: models.map((m) => ({
           id: m.id,
           name: m.id
         }))
       };
     } catch (error) {
-      console.error("Error fetching models from OpenAI:", error);
-      return { models: [{ id: "gpt-4o", name: "GPT-4o" }] };
+      console.error(`Error fetching models from ${this.name}:`, error);
+      return { models: [{ id: this.settings.model, name: this.settings.model }] };
     }
   }
   async streamResponse(prompt, model, config, abortController, onChunk, onDone) {
@@ -173,7 +193,7 @@ class OpenAIProvider {
     });
     if (!response.ok) {
       const err = await response.json();
-      throw new Error(`OpenAI API error: ${((_a = err.error) == null ? void 0 : _a.message) || response.statusText}`);
+      throw new Error(`${this.name} API error: ${((_a = err.error) == null ? void 0 : _a.message) || response.statusText}`);
     }
     const reader = (_b = response.body) == null ? void 0 : _b.getReader();
     if (!reader) throw new Error("Failed to read response body");
@@ -199,7 +219,6 @@ class OpenAIProvider {
                 prompt_eval_count: data.usage.prompt_tokens,
                 eval_count: data.usage.completion_tokens,
                 total_duration: (Date.now() - startTime) * 1e6
-                // Convert to ns to match Ollama
               });
               continue;
             }
@@ -214,11 +233,36 @@ class OpenAIProvider {
               });
             }
           } catch (e) {
-            console.error("Error parsing OpenAI stream chunk:", trimmedLine, e);
+            console.error(`Error parsing ${this.name} stream chunk:`, trimmedLine, e);
           }
         }
       }
     }
+  }
+}
+class OpenAIProvider extends OpenAICompatibleProvider {
+  constructor(settings) {
+    super("openai", "OpenAI", settings, ["gpt-", "o1-", "o3-", "o4-", "o5-"]);
+  }
+}
+class GeminiProvider extends OpenAICompatibleProvider {
+  constructor(settings) {
+    super("gemini", "Gemini", settings, ["gemini-"]);
+  }
+}
+class GrokProvider extends OpenAICompatibleProvider {
+  constructor(settings) {
+    super("grok", "Grok", settings, ["grok-"]);
+  }
+}
+class GLMProvider extends OpenAICompatibleProvider {
+  constructor(settings) {
+    super("glm", "GLM", settings, ["glm-"]);
+  }
+}
+class KimiProvider extends OpenAICompatibleProvider {
+  constructor(settings) {
+    super("kimi", "Kimi", settings, ["moonshot-"]);
   }
 }
 class LLMService {
@@ -230,8 +274,16 @@ class LLMService {
   initializeProviders() {
     const ollama = new OllamaProvider(this.settings.ollama);
     const openai = new OpenAIProvider(this.settings.openai);
+    const gemini = new GeminiProvider(this.settings.gemini);
+    const grok = new GrokProvider(this.settings.grok);
+    const glm = new GLMProvider(this.settings.glm);
+    const kimi = new KimiProvider(this.settings.kimi);
     this.providers.set(ollama.id, ollama);
     this.providers.set(openai.id, openai);
+    this.providers.set(gemini.id, gemini);
+    this.providers.set(grok.id, grok);
+    this.providers.set(glm.id, glm);
+    this.providers.set(kimi.id, kimi);
   }
   getProvider(id) {
     const provider = this.providers.get(id);
@@ -775,16 +827,24 @@ class LLMSettingTab extends obsidian.PluginSettingTab {
     containerEl.empty();
     containerEl.createEl("h2", { text: "General Settings" });
     new obsidian.Setting(containerEl).setName("Active Provider").setDesc("Select the AI provider to use by default").addDropdown((dropdown) => {
-      dropdown.addOption("ollama", "Ollama (Local)").addOption("openai", "OpenAI (Cloud)").setValue(this.plugin.settings.activeProvider).onChange(async (value) => {
+      dropdown.addOption("ollama", "Ollama (Local)").addOption("openai", "OpenAI").addOption("gemini", "Gemini (Google)").addOption("grok", "Grok (xAI)").addOption("glm", "GLM (Zhipu AI)").addOption("kimi", "Kimi (Moonshot AI)").setValue(this.plugin.settings.activeProvider).onChange(async (value) => {
         this.plugin.settings.activeProvider = value;
         await this.plugin.saveSettings();
         this.display();
       });
     });
-    if (this.plugin.settings.activeProvider === "ollama") {
+    const activeProvider = this.plugin.settings.activeProvider;
+    if (activeProvider === "ollama") {
       this.renderOllamaSettings(containerEl);
-    } else if (this.plugin.settings.activeProvider === "openai") {
-      this.renderOpenAISettings(containerEl);
+    } else {
+      const providerNames = {
+        openai: "OpenAI",
+        gemini: "Gemini",
+        grok: "Grok",
+        glm: "GLM (Zhipu)",
+        kimi: "Kimi (Moonshot)"
+      };
+      this.renderGenericSettings(containerEl, activeProvider, providerNames[activeProvider]);
     }
   }
   renderOllamaSettings(containerEl) {
@@ -812,25 +872,32 @@ class LLMSettingTab extends obsidian.PluginSettingTab {
       });
     });
   }
-  renderOpenAISettings(containerEl) {
-    containerEl.createEl("h3", { text: "OpenAI Settings" });
-    new obsidian.Setting(containerEl).setName("API Key").setDesc("Your OpenAI API key").addText((text) => text.setPlaceholder("sk-...").setValue(this.plugin.settings.openai.apiKey).onChange(async (value) => {
-      this.plugin.settings.openai.apiKey = value;
+  renderGenericSettings(containerEl, providerId, name) {
+    containerEl.createEl("h3", { text: `${name} Settings` });
+    const settings = this.plugin.settings[providerId];
+    new obsidian.Setting(containerEl).setName("API Key").setDesc(`Your ${name} API key`).addText((text) => text.setPlaceholder("API Key").setValue(settings.apiKey).onChange(async (value) => {
+      settings.apiKey = value;
       await this.plugin.saveSettings();
     }).inputEl.type = "password");
-    new obsidian.Setting(containerEl).setName("Base URL").setDesc("Custom endpoint (optional)").addText((text) => text.setPlaceholder("https://api.openai.com/v1").setValue(this.plugin.settings.openai.baseUrl).onChange(async (value) => {
-      this.plugin.settings.openai.baseUrl = value;
+    new obsidian.Setting(containerEl).setName("Base URL").setDesc("Custom endpoint URL").addText((text) => text.setPlaceholder("https://...").setValue(settings.baseUrl).onChange(async (value) => {
+      settings.baseUrl = value;
       await this.plugin.saveSettings();
     }));
-    new obsidian.Setting(containerEl).setName("Default Model").setDesc("Default model for OpenAI").addDropdown(async (dropdown) => {
-      const provider = this.plugin.llmService.getProvider("openai");
-      const response = await provider.fetchModels();
-      response.models.forEach((m) => {
-        dropdown.addOption(m.id, m.name);
-      });
-      dropdown.setValue(this.plugin.settings.openai.model);
+    new obsidian.Setting(containerEl).setName("Default Model").setDesc(`Default model for ${name}`).addDropdown(async (dropdown) => {
+      dropdown.addOption("", "Loading models...");
+      try {
+        const provider = this.plugin.llmService.getProvider(providerId);
+        const response = await provider.fetchModels();
+        dropdown.selectEl.innerHTML = "";
+        response.models.forEach((m) => {
+          dropdown.addOption(m.id, m.name);
+        });
+        dropdown.setValue(settings.model);
+      } catch (e) {
+        dropdown.addOption("", "Could not load models");
+      }
       dropdown.onChange(async (value) => {
-        this.plugin.settings.openai.model = value;
+        settings.model = value;
         await this.plugin.saveSettings();
       });
     });

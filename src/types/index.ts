@@ -1,11 +1,11 @@
-export type ProviderType = 'ollama' | 'openai';
+export type ProviderType = 'ollama' | 'openai' | 'gemini' | 'grok' | 'glm' | 'kimi';
 
 export interface OllamaSettings {
 	serverUrl: string;
 	model: string;
 }
 
-export interface OpenAISettings {
+export interface GenericLLMSettings {
 	apiKey: string;
 	baseUrl: string;
 	model: string;
@@ -14,7 +14,11 @@ export interface OpenAISettings {
 export interface LLMSettings {
 	activeProvider: ProviderType;
 	ollama: OllamaSettings;
-	openai: OpenAISettings;
+	openai: GenericLLMSettings;
+	gemini: GenericLLMSettings;
+	grok: GenericLLMSettings;
+	glm: GenericLLMSettings;
+	kimi: GenericLLMSettings;
 }
 
 export const DEFAULT_SETTINGS: LLMSettings = {
@@ -26,7 +30,27 @@ export const DEFAULT_SETTINGS: LLMSettings = {
 	openai: {
 		apiKey: '',
 		baseUrl: 'https://api.openai.com/v1',
-		model: 'gpt-4o'
+		model: 'gpt-5.2'
+	},
+	gemini: {
+		apiKey: '',
+		baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+		model: 'gemini-3-pro'
+	},
+	grok: {
+		apiKey: '',
+		baseUrl: 'https://api.x.ai/v1',
+		model: 'grok-4.1'
+	},
+	glm: {
+		apiKey: '',
+		baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+		model: 'glm-4.7'
+	},
+	kimi: {
+		apiKey: '',
+		baseUrl: 'https://api.moonshot.cn/v1',
+		model: 'moonshot-v1-8k'
 	}
 };
 

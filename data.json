@@ -1,5 +1,5 @@
 {
-  "activeProvider": "ollama",
+  "activeProvider": "gemini",
   "ollama": {
     "serverUrl": "http://localhost:11434",
     "model": "gemma3n:e2b"
@@ -8,5 +8,25 @@
     "apiKey": "",
     "baseUrl": "https://api.openai.com/v1",
     "model": "gpt-4o"
+  },
+  "gemini": {
+    "apiKey": "",
+    "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "model": "gpt-4o-mini"
+  },
+  "grok": {
+    "apiKey": "",
+    "baseUrl": "https://api.x.ai/v1",
+    "model": "grok-beta"
+  },
+  "glm": {
+    "apiKey": "",
+    "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
+    "model": "glm-4"
+  },
+  "kimi": {
+    "apiKey": "",
+    "baseUrl": "https://api.moonshot.cn/v1",
+    "model": "moonshot-v1-8k"
   }
 }

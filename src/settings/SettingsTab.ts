@@ -22,7 +22,11 @@ export class LLMSettingTab extends PluginSettingTab {
             .addDropdown(dropdown => {
                 dropdown
                     .addOption('ollama', 'Ollama (Local)')
-                    .addOption('openai', 'OpenAI (Cloud)')
+                    .addOption('openai', 'OpenAI')
+                    .addOption('gemini', 'Gemini (Google)')
+                    .addOption('grok', 'Grok (xAI)')
+                    .addOption('glm', 'GLM (Zhipu AI)')
+                    .addOption('kimi', 'Kimi (Moonshot AI)')
                     .setValue(this.plugin.settings.activeProvider)
                     .onChange(async (value: ProviderType) => {
                         this.plugin.settings.activeProvider = value;
@@ -31,10 +35,18 @@ export class LLMSettingTab extends PluginSettingTab {
                     });
             });
 
-        if (this.plugin.settings.activeProvider === 'ollama') {
+        const activeProvider = this.plugin.settings.activeProvider;
+        if (activeProvider === 'ollama') {
             this.renderOllamaSettings(containerEl);
-        } else if (this.plugin.settings.activeProvider === 'openai') {
-            this.renderOpenAISettings(containerEl);
+        } else {
+            const providerNames: Record<string, string> = {
+                openai: 'OpenAI',
+                gemini: 'Gemini',
+                grok: 'Grok',
+                glm: 'GLM (Zhipu)',
+                kimi: 'Kimi (Moonshot)'
+            };
+            this.renderGenericSettings(containerEl, activeProvider, providerNames[activeProvider]);
         }
     }
 
@@ -78,45 +90,54 @@ export class LLMSettingTab extends PluginSettingTab {
             });
     }
 
-    private renderOpenAISettings(containerEl: HTMLElement) {
-        containerEl.createEl('h3', { text: 'OpenAI Settings' });
+    private renderGenericSettings(containerEl: HTMLElement, providerId: Extract<ProviderType, 'openai' | 'gemini' | 'grok' | 'glm' | 'kimi'>, name: string) {
+        containerEl.createEl('h3', { text: `${name} Settings` });
+
+        const settings = this.plugin.settings[providerId];
 
         new Setting(containerEl)
             .setName('API Key')
-            .setDesc('Your OpenAI API key')
+            .setDesc(`Your ${name} API key`)
             .addText(text => text
-                .setPlaceholder('sk-...')
-                .setValue(this.plugin.settings.openai.apiKey)
+                .setPlaceholder('API Key')
+                .setValue(settings.apiKey)
                 .onChange(async (value) => {
-                    this.plugin.settings.openai.apiKey = value;
+                    settings.apiKey = value;
                     await this.plugin.saveSettings();
                 })
                 .inputEl.type = 'password');
 
         new Setting(containerEl)
             .setName('Base URL')
-            .setDesc('Custom endpoint (optional)')
+            .setDesc('Custom endpoint URL')
             .addText(text => text
-                .setPlaceholder('https://api.openai.com/v1')
-                .setValue(this.plugin.settings.openai.baseUrl)
+                .setPlaceholder('https://...')
+                .setValue(settings.baseUrl)
                 .onChange(async (value) => {
-                    this.plugin.settings.openai.baseUrl = value;
+                    settings.baseUrl = value;
                     await this.plugin.saveSettings();
                 }));
 
         new Setting(containerEl)
             .setName('Default Model')
-            .setDesc('Default model for OpenAI')
+            .setDesc(`Default model for ${name}`)
             .addDropdown(async (dropdown) => {
-                const provider = this.plugin.llmService.getProvider('openai');
-                const response = await provider.fetchModels();
-                response.models.forEach((m: LLMModel) => {
-                    dropdown.addOption(m.id, m.name);
-                });
-                dropdown.setValue(this.plugin.settings.openai.model);
+                dropdown.addOption('', 'Loading models...');
+                try {
+                    const provider = this.plugin.llmService.getProvider(providerId);
+                    const response = await provider.fetchModels();
+
+                    dropdown.selectEl.innerHTML = '';
+                    response.models.forEach((m: LLMModel) => {
+                        dropdown.addOption(m.id, m.name);
+                    });
+                    dropdown.setValue(settings.model);
+                } catch (e) {
+                    dropdown.addOption('', 'Could not load models');
+                }
 
                 dropdown.onChange(async (value) => {
-                    this.plugin.settings.openai.model = value;
+                    settings.model = value;
                     await this.plugin.saveSettings();
                 });
             });

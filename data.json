@@ -1,14 +1,12 @@
 {
-  "activeProvider": "openai",
+  "activeProvider": "ollama",
   "ollama": {
     "serverUrl": "http://localhost:11434",
-    "model": "llama3"
+    "model": "gemma3n:e2b"
   },
   "openai": {
     "apiKey": "",
     "baseUrl": "https://api.openai.com/v1",
     "model": "gpt-4o"
-  },
-  "model": "gemma3n:e2b",
-  "serverUrl": "http://localhost:11434"
+  }
 }

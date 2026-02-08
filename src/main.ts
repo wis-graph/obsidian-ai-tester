@@ -32,11 +32,33 @@ export default class AITesterPlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		const loadedData = await this.loadData();
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, loadedData);
+
+		// Migration: Move top-level model/serverUrl if they exist
+		if (loadedData && (loadedData.model || loadedData.serverUrl)) {
+			if (loadedData.model && !loadedData.ollama?.model) {
+				this.settings.ollama.model = loadedData.model;
+			}
+			if (loadedData.serverUrl && !loadedData.ollama?.serverUrl) {
+				this.settings.ollama.serverUrl = loadedData.serverUrl;
+			}
+
+			// Clean up top level and save immediately
+			await this.saveSettings();
+		}
 	}
 
 	async saveSettings() {
-		await this.saveData(this.settings);
+		// Only save keys that are in DEFAULT_SETTINGS
+		const sanitizedSettings: any = {};
+		const validKeys = Object.keys(DEFAULT_SETTINGS) as (keyof LLMSettings)[];
+
+		validKeys.forEach(key => {
+			sanitizedSettings[key] = this.settings[key];
+		});
+
+		await this.saveData(sanitizedSettings);
 		this.llmService.updateSettings(this.settings);
 	}
 }

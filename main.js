@@ -840,10 +840,26 @@ class AITesterPlugin extends obsidian.Plugin {
     console.log("AI Tester plugin unloaded");
   }
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    var _a, _b;
+    const loadedData = await this.loadData();
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, loadedData);
+    if (loadedData && (loadedData.model || loadedData.serverUrl)) {
+      if (loadedData.model && !((_a = loadedData.ollama) == null ? void 0 : _a.model)) {
+        this.settings.ollama.model = loadedData.model;
+      }
+      if (loadedData.serverUrl && !((_b = loadedData.ollama) == null ? void 0 : _b.serverUrl)) {
+        this.settings.ollama.serverUrl = loadedData.serverUrl;
+      }
+      await this.saveSettings();
+    }
   }
   async saveSettings() {
-    await this.saveData(this.settings);
+    const sanitizedSettings = {};
+    const validKeys = Object.keys(DEFAULT_SETTINGS);
+    validKeys.forEach((key) => {
+      sanitizedSettings[key] = this.settings[key];
+    });
+    await this.saveData(sanitizedSettings);
     this.llmService.updateSettings(this.settings);
   }
 }

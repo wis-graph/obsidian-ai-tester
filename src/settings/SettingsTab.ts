@@ -1,11 +1,11 @@
 import { App, PluginSettingTab, Setting, Notice } from 'obsidian';
-import type ObsidianOllamaTestPlugin from '../main';
+import type AITesterPlugin from '../main';
 import { ProviderType, LLMModel } from '../types';
 
 export class LLMSettingTab extends PluginSettingTab {
-    plugin: ObsidianOllamaTestPlugin;
+    plugin: AITesterPlugin;
 
-    constructor(app: App, plugin: ObsidianOllamaTestPlugin) {
+    constructor(app: App, plugin: AITesterPlugin) {
         super(app, plugin);
         this.plugin = plugin;
     }

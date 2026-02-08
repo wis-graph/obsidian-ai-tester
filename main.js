@@ -570,9 +570,9 @@ class OllamaBlockView {
         configDisplay.style.display = isHidden ? "block" : "none";
         advancedButton.style.background = isHidden ? "var(--background-modifier-active-hover)" : "transparent";
       });
-      configTextarea.addEventListener("input", this.debounce(() => {
+      configTextarea.addEventListener("blur", () => {
         this.manager.updateFileBlock(this.el, this.ctx, promptInput.innerText.trim(), configTextarea.value.trim());
-      }, 1e3));
+      });
     }
     const updateResponseCount = this.debounce((val) => {
       this.blockSettings.yamlConfig.num_responses = val;

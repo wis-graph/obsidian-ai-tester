@@ -1,0 +1,29 @@
+.ollama-container {
+	border: 1px solid var(--background-modifier-border);
+}
+
+.ollama-prompt-input {
+	resize: both;
+	overflow: auto;
+}
+
+.ollama-prompt-input:focus {
+	outline: none;
+	border-color: var(--interactive-accent);
+}
+
+.ollama-output pre {
+	margin: 0;
+	font-family: var(--font-monospace);
+	font-size: var(--font-smaller);
+	line-height: 1.5;
+}
+
+.ollama-button-container button:hover:not(:disabled) {
+	background-color: var(--interactive-hover);
+}
+
+.ollama-button-container button:disabled {
+	opacity: 0.6;
+	cursor: not-allowed;
+}

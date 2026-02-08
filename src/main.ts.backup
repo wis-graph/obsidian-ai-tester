@@ -1,0 +1,799 @@
+import { Plugin, Notice, PluginSettingTab, Setting, requestUrl } from 'obsidian';
+import { OllamaSettings, DEFAULT_SETTINGS, OllamaGenerateResponse, OllamaListResponse, OllamaBlockSettings, DEFAULT_BLOCK_CONFIG } from './types';
+
+export default class ObsidianOllamaTestPlugin extends Plugin {
+	settings: OllamaSettings = DEFAULT_SETTINGS;
+	private modelsCache: OllamaListResponse | null = null;
+	private renderCount = 0;
+	private activeBlockEl: HTMLElement | null = null;
+	private unsavedChanges: { [key: string]: { prompt: string; yaml: string } } = {};
+
+	async onload() {
+		console.log('Obsidian Ollama Test plugin loading...');
+		
+		await this.loadSettings();
+		this.addSettingTab(new OllamaSettingTab(this.app, this));
+
+		this.registerMarkdownCodeBlockProcessor('ollama', (source, el, ctx) => {
+			if (this.renderCount === 0) {
+				this.renderCount++;
+				this.activeBlockEl = el;
+				this.renderOllamaBlock(source, el);
+			} else {
+				el.createDiv({
+					text: '⚠️ Only the first ollama block is active',
+					cls: 'ollama-inactive-notice'
+				}).style.cssText = `
+					padding: 12px;
+					background: var(--color-warning-bg);
+					border: 1px solid var(--color-warning);
+					border-radius: 4px;
+					color: var(--text-warning);
+				`;
+			}
+		});
+	}
+
+	async onunload() {
+		console.log('Obsidian Ollama Test plugin unloaded');
+	}
+
+	async loadSettings() {
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+	}
+
+	async saveSettings() {
+		await this.saveData(this.settings);
+	}
+
+	parseBlockSource(source: string): OllamaBlockSettings {
+		const trimmedSource = source.trim();
+		
+		const yamlMatch = trimmedSource.match(/^---\n([\s\S]*?)\n---/);
+		
+		if (!yamlMatch) {
+			return {
+				yamlConfig: DEFAULT_BLOCK_CONFIG,
+				prompt: trimmedSource,
+				hasYaml: false
+			};
+		}
+
+		try {
+			const yamlText = yamlMatch[1];
+			const yamlConfig: any = {};
+			let hasError = false;
+
+			yamlText.split('\n').forEach(line => {
+				const trimmedLine = line.trim();
+				if (!trimmedLine || trimmedLine.startsWith('#')) return;
+
+				const colonIndex = trimmedLine.indexOf(':');
+				if (colonIndex === -1) return;
+
+				const key = trimmedLine.substring(0, colonIndex).trim();
+				let value = trimmedLine.substring(colonIndex + 1).trim();
+
+				if (value === '[]') {
+					yamlConfig[key] = [];
+				} else if (value.startsWith('[') && value.endsWith(']')) {
+					yamlConfig[key] = value.slice(1, -1).split(',').map(v => v.trim().replace(/^['"]|['"]$/g, ''));
+				} else if (value.startsWith('"') && value.endsWith('"')) {
+					yamlConfig[key] = value.slice(1, -1);
+				} else {
+					const numValue = parseFloat(value);
+					yamlConfig[key] = isNaN(numValue) ? value : numValue;
+				}
+			});
+
+			const config: OllamaBlockSettings = {
+				yamlConfig: { ...DEFAULT_BLOCK_CONFIG, ...yamlConfig },
+				prompt: trimmedSource.substring(yamlMatch[0].length).trim(),
+				hasYaml: true
+			};
+
+			this.validateYamlConfig(config.yamlConfig);
+
+			return config;
+		} catch (error) {
+			console.error('Error parsing YAML:', error);
+			new Notice('YAML parsing error, using default settings');
+			return {
+				yamlConfig: DEFAULT_BLOCK_CONFIG,
+				prompt: trimmedSource,
+				hasYaml: false
+			};
+		}
+	}
+
+	validateYamlConfig(config: any) {
+		const errors: string[] = [];
+
+		if (config.temperature !== undefined && (config.temperature < 0 || config.temperature > 2)) {
+			errors.push('Temperature must be between 0 and 2');
+		}
+
+		if (config.max_tokens !== undefined && (config.max_tokens < 1 || config.max_tokens > 20000)) {
+			errors.push('Max tokens must be between 1 and 20000');
+		}
+
+		if (config.top_p !== undefined && (config.top_p < 0 || config.top_p > 1)) {
+			errors.push('Top P must be between 0 and 1');
+		}
+
+		if (config.frequency_penalty !== undefined && (config.frequency_penalty < 0 || config.frequency_penalty > 2)) {
+			errors.push('Frequency penalty must be between 0 and 2');
+		}
+
+		if (config.presence_penalty !== undefined && (config.presence_penalty < 0 || config.presence_penalty > 2)) {
+			errors.push('Presence penalty must be between 0 and 2');
+		}
+
+		if (errors.length > 0) {
+			new Notice(`YAML validation errors:\n${errors.join('\n')}`);
+			return false;
+		}
+
+		return true;
+	}
+
+	generateYamlFromConfig(config: OllamaBlockSettings['yamlConfig']): string {
+		const lines: string[] = [];
+		
+		if (config.temperature !== undefined && config.temperature !== DEFAULT_BLOCK_CONFIG.temperature) {
+			lines.push(`temperature: ${config.temperature}`);
+		}
+
+		if (config.max_tokens !== undefined && config.max_tokens !== DEFAULT_BLOCK_CONFIG.max_tokens) {
+			lines.push(`max_tokens: ${config.max_tokens}`);
+		}
+
+		if (config.stop_sequences && config.stop_sequences.length > 0) {
+			const stopStr = JSON.stringify(config.stop_sequences);
+			lines.push(`stop_sequences: ${stopStr}`);
+		}
+
+		if (config.top_p !== undefined && config.top_p !== DEFAULT_BLOCK_CONFIG.top_p) {
+			lines.push(`top_p: ${config.top_p}`);
+		}
+
+		if (config.frequency_penalty !== undefined && config.frequency_penalty !== DEFAULT_BLOCK_CONFIG.frequency_penalty) {
+			lines.push(`frequency_penalty: ${config.frequency_penalty}`);
+		}
+
+		if (config.presence_penalty !== undefined && config.presence_penalty !== DEFAULT_BLOCK_CONFIG.presence_penalty) {
+			lines.push(`presence_penalty: ${config.presence_penalty}`);
+		}
+
+		if (lines.length === 0) {
+			return '';
+		}
+
+		return `---\n${lines.join('\n')}\n---`;
+	}
+
+	private debounce<T extends (...args: any[]) => any>(func: T, wait: number): (...args: any[]) => void {
+		let timeout: any = null;
+		return (...args: Parameters<T>) => {
+			if (timeout !== null) {
+				clearTimeout(timeout);
+			}
+			timeout = setTimeout(() => func(...args), wait);
+		};
+	}
+
+	async updateBlockSource(newPrompt: string, newYaml: string): Promise<void> {
+		const file = this.app.workspace.getActiveFile();
+		if (!file) {
+			console.log('No active file');
+			return;
+		}
+
+		try {
+			const content = await this.app.vault.read(file);
+			const currentBlockRegex = /```ollama\n([\s\S]*?)\n```/s;
+			const match = currentBlockRegex.exec(content);
+			
+			if (match) {
+				const matchText = match[0] as string;
+				const blockId = `${file.path}-${content.indexOf(matchText)}`;
+				this.unsavedChanges[blockId] = { prompt: newPrompt, yaml: newYaml };
+				
+				const currentYamlMatch = match[1].match(/^---\n([\s\S]*?)\n---/);
+				const currentPrompt = currentYamlMatch 
+					? match[1].substring((currentYamlMatch as any)[0].length).trim()
+					: match[1].trim();
+				
+				let updatedBlock: string;
+				
+				if (newYaml) {
+					updatedBlock = `---\n${newYaml}\n---\n${newPrompt}`;
+				} else {
+					updatedBlock = newPrompt;
+				}
+				
+				const newContent = content.replace(matchText, `ollama\n${updatedBlock}\n````) as string;
+				await this.app.vault.modify(file, newContent);
+				delete this.unsavedChanges[blockId];
+				new Notice('Block synced to file');
+			}
+		} catch (error) {
+			console.error('Sync failed:', error);
+			new Notice('Failed to sync block. Please save manually.');
+		}
+	}
+
+	async callOllamaAPIStream(prompt: string, outputElement: HTMLElement, abortController: AbortController, metaInfoElement: HTMLElement, yamlConfig: OllamaBlockSettings['yamlConfig']): Promise<void> {
+		return this.callOllamaAPIStreamWithModel(prompt, this.settings.model, outputElement, abortController, metaInfoElement, yamlConfig);
+	}
+
+	async callOllamaAPIStreamWithModel(prompt: string, model: string, outputElement: HTMLElement, abortController: AbortController, metaInfoElement: HTMLElement, yamlConfig: OllamaBlockSettings['yamlConfig']): Promise<void> {
+		try {
+			const requestBody: any = {
+				model: model,
+				prompt: prompt,
+				stream: true,
+				options: {}
+			};
+
+			if (yamlConfig.temperature !== undefined) {
+				requestBody.options.temperature = yamlConfig.temperature;
+			}
+
+			if (yamlConfig.max_tokens !== undefined) {
+				requestBody.options.num_predict = yamlConfig.max_tokens;
+			}
+
+			if (yamlConfig.stop_sequences && yamlConfig.stop_sequences.length > 0) {
+				requestBody.options.stop = yamlConfig.stop_sequences;
+			}
+
+			if (yamlConfig.top_p !== undefined) {
+				requestBody.options.top_p = yamlConfig.top_p;
+			}
+
+			if (yamlConfig.frequency_penalty !== undefined) {
+				requestBody.options.frequency_penalty = yamlConfig.frequency_penalty;
+			}
+
+			if (yamlConfig.presence_penalty !== undefined) {
+				requestBody.options.presence_penalty = yamlConfig.presence_penalty;
+			}
+
+			const response = await fetch(`${this.settings.serverUrl}/api/generate`, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json'
+				},
+				body: JSON.stringify(requestBody),
+				signal: abortController.signal
+			});
+
+			if (!response.ok) {
+				throw new Error(`Ollama API error: ${response.status}`);
+			}
+
+			const reader = response.body?.getReader();
+			if (!reader) {
+				throw new Error('Failed to read response body');
+			}
+
+			const decoder = new TextDecoder();
+			let buffer = '';
+			let finalData: OllamaGenerateResponse | null = null;
+
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+
+				buffer += decoder.decode(value, { stream: true });
+				const lines = buffer.split('\n');
+				buffer = lines.pop() || '';
+
+				for (const line of lines) {
+					if (line.trim() === '') continue;
+					
+					try {
+						const data = JSON.parse(line) as OllamaGenerateResponse;
+						if (data.response) {
+							outputElement.textContent += data.response;
+						}
+						if (data.done) {
+							finalData = data;
+						}
+					} catch (parseError) {
+						console.error('Error parsing JSON:', parseError, 'Line:', line);
+					}
+				}
+			}
+
+			if (finalData) {
+				const totalSeconds = (finalData.total_duration || 0) / 1e9;
+				const promptTokens = finalData.prompt_eval_count || 0;
+				const completionTokens = finalData.eval_count || 0;
+				const totalTokens = promptTokens + completionTokens;
+
+				metaInfoElement.innerHTML = `
+					<div style="display: flex; gap: 12px; font-size: var(--font-smaller); color: var(--text-muted);">
+						<span><strong>Model:</strong> ${model}</span>
+						<span><strong>Tokens:</strong> ${totalTokens.toLocaleString()}</span>
+						<span><strong>Time:</strong> ${totalSeconds.toFixed(2)}s</span>
+					</div>
+				`;
+			}
+		} catch (error) {
+			if ((error as Error).name === 'AbortError') {
+				console.log('Request aborted');
+			} else {
+				console.error('Error calling Ollama API:', error);
+				throw error;
+			}
+		}
+	}
+
+	async fetchModels(): Promise<OllamaListResponse> {
+		if (this.modelsCache) {
+			return this.modelsCache;
+		}
+
+		try {
+			const response = await requestUrl({
+				url: `${this.settings.serverUrl}/api/tags`,
+				method: 'GET'
+			});
+
+			if (response.status !== 200) {
+				throw new Error(`Failed to fetch models: ${response.status}`);
+			}
+
+			const data = response.json as OllamaListResponse;
+			this.modelsCache = data;
+			return data;
+		} catch (error) {
+			console.error('Error fetching models:', error);
+			throw error;
+		}
+	}
+
+	clearModelsCache() {
+		this.modelsCache = null;
+	}
+
+	renderOllamaBlock(source: string, el: HTMLElement) {
+		el.empty();
+
+		const blockSettings = this.parseBlockSource(source);
+		const container = el.createDiv({ cls: 'ollama-container' });
+		container.style.cssText = `
+			padding: 12px;
+			background: var(--background-secondary);
+			border-radius: 8px;
+			margin: 10px 0;
+		`;
+
+		const headerRow = container.createDiv({ cls: 'ollama-header' });
+		headerRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;';
+
+		const label = headerRow.createEl('label', { text: 'Prompt:', cls: 'setting-item-name' });
+		label.style.cssText = 'font-weight: 600; margin-right: 16px;';
+
+		const controlsRow = headerRow.createDiv({ cls: 'ollama-controls' });
+		controlsRow.style.cssText = 'display: flex; align-items: center; gap: 16px;';
+
+		const modelDropdown = controlsRow.createEl('select', {
+			cls: 'ollama-model-dropdown',
+			attr: { placeholder: 'Select model...' }
+		});
+		modelDropdown.style.cssText = `
+			padding: 6px 12px;
+			border: 1px solid var(--background-modifier-border);
+			border-radius: 4px;
+			background: var(--background-primary);
+			color: var(--text-normal);
+			font-family: inherit;
+			font-size: var(--font-smaller);
+			cursor: pointer;
+			max-width: 250px;
+		`;
+
+		if (blockSettings.hasYaml) {
+			const advancedButton = controlsRow.createEl('button', {
+				text: '🔧 Advanced',
+				cls: 'mod-cta'
+			});
+			advancedButton.style.cssText = `
+				padding: 6px 12px;
+				border: none;
+				border-radius: 4px;
+				cursor: pointer;
+				font-weight: 600;
+				font-size: var(--font-smaller);
+			`;
+
+			const configDisplay = container.createDiv({ cls: 'ollama-config-display' });
+			configDisplay.style.cssText = `
+				display: none;
+				background: var(--background-primary);
+				border: 1px solid var(--background-modifier-border);
+				border-radius: 4px;
+				padding: 12px;
+				margin-bottom: 12px;
+				font-size: var(--font-smaller);
+			`;
+
+			const configTextarea = configDisplay.createEl('textarea', {
+				attr: { rows: 8, placeholder: 'YAML configuration...' }
+			});
+			configTextarea.style.cssText = `
+				width: 100%;
+				padding: 8px;
+				border: 1px solid var(--background-modifier-border);
+				border-radius: 4px;
+				background: var(--background-primary);
+				color: var(--text-normal);
+				font-family: inherit;
+				resize: vertical;
+				font-family: var(--font-monospace);
+				font-size: var(--font-smaller);
+			`;
+
+			const yamlText = this.generateYamlFromConfig(blockSettings.yamlConfig);
+			configTextarea.value = yamlText;
+
+			advancedButton.addEventListener('click', () => {
+				if (configDisplay.style.display === 'none') {
+					configDisplay.style.display = 'block';
+					advancedButton.textContent = '🔧 Hide';
+				} else {
+					configDisplay.style.display = 'none';
+					advancedButton.textContent = '🔧 Advanced';
+				}
+			});
+
+			configTextarea.addEventListener('input', this.debounce(async () => {
+				const newYaml = configTextarea.value.trim();
+				const newPrompt = promptInput.innerText.trim();
+				await this.updateBlockSource(newPrompt, newYaml);
+			}, 500));
+		}
+
+		const responsesContainer = controlsRow.createDiv({ cls: 'ollama-responses-control' });
+		responsesContainer.style.cssText = 'display: flex; align-items: center; gap: 8px;';
+
+		const responsesLabel = responsesContainer.createEl('label', { text: 'Responses:', cls: 'setting-item-name' });
+		responsesLabel.style.cssText = 'font-size: var(--font-smaller);';
+
+		const responsesSlider = responsesContainer.createEl('input', {
+			cls: 'ollama-responses-slider',
+			attr: { type: 'range', min: '1', max: '20', value: '1', step: '1' }
+		});
+		responsesSlider.style.cssText = `
+			width: 100px;
+			cursor: pointer;
+		`;
+
+		const responsesInput = responsesContainer.createEl('input', {
+			cls: 'ollama-responses-input',
+			attr: { type: 'number', min: '1', max: '20', value: '1' }
+		});
+		responsesInput.style.cssText = `
+			width: 60px;
+			padding: 4px 8px;
+			border: 1px solid var(--background-modifier-border);
+			border-radius: 4px;
+			background: var(--background-primary);
+			color: var(--text-normal);
+			font-family: inherit;
+			font-size: var(--font-smaller);
+		`;
+
+		responsesSlider.addEventListener('input', () => {
+			responsesInput.value = responsesSlider.value;
+		});
+
+		responsesInput.addEventListener('input', () => {
+			let value = parseInt(responsesInput.value);
+			if (isNaN(value)) value = 1;
+			if (value < 1) value = 1;
+			if (value > 20) value = 20;
+			responsesSlider.value = value.toString();
+		});
+
+		const promptInput = container.createEl('div', {
+			cls: 'ollama-prompt-input',
+			attr: { contenteditable: 'true', 'data-placeholder': 'Enter your prompt here... (Press Ctrl+Enter to generate)' }
+		});
+		promptInput.innerHTML = this.escapeHtml(blockSettings.prompt);
+		promptInput.style.cssText = `
+			width: 100%;
+			padding: 8px;
+			border: 1px solid var(--background-modifier-border);
+			border-radius: 4px;
+			background: var(--background-primary);
+			color: var(--text-normal);
+			font-family: inherit;
+			resize: both;
+			overflow: auto;
+			min-height: 80px;
+			min-width: 100%;
+			margin-bottom: 12px;
+			white-space: pre-wrap;
+			word-wrap: break-word;
+		`;
+
+		if (promptInput.innerHTML === '') {
+			promptInput.innerHTML = '';
+		}
+
+		promptInput.addEventListener('input', () => {
+			if (promptInput.innerHTML.trim() === '') {
+				promptInput.innerHTML = '';
+			}
+		});
+
+		const debouncedPromptUpdate = this.debounce(async () => {
+			const newPrompt = promptInput.innerText.trim();
+			const newYaml = this.generateYamlFromConfig(blockSettings.yamlConfig);
+			if (newYaml) {
+				await this.updateBlockSource(newPrompt, newYaml);
+			}
+		}, 500);
+
+		promptInput.addEventListener('input', debouncedPromptUpdate);
+
+		const buttonContainer = container.createDiv({ cls: 'ollama-button-container' });
+		buttonContainer.style.cssText = 'display: flex; gap: 10px;';
+
+		const submitButton = buttonContainer.createEl('button', {
+			text: 'Generate',
+			cls: 'mod-cta'
+		});
+		submitButton.style.cssText = `
+			padding: 8px 16px;
+			border: none;
+			border-radius: 4px;
+			cursor: pointer;
+			font-weight: 600;
+		`;
+
+		const cancelButton = buttonContainer.createEl('button', {
+			text: 'Stop',
+			cls: 'mod-warning'
+		});
+		cancelButton.style.cssText = `
+			padding: 8px 16px;
+			border: none;
+			border-radius: 4px;
+			cursor: pointer;
+			font-weight: 600;
+			display: none;
+		`;
+
+		const responsesWrapper = container.createDiv({ cls: 'ollama-responses-wrapper' });
+		responsesWrapper.style.cssText = `
+			margin-top: 12px;
+			display: none;
+			flex-direction: column;
+			gap: 8px;
+		`;
+
+		let abortController: AbortController | null = null;
+		let selectedModel = this.settings.model;
+		let numResponses = 1;
+
+		const populateModelDropdown = async () => {
+			modelDropdown.innerHTML = '<option value="">Loading models...</option>';
+			
+			try {
+				const response = await this.fetchModels();
+				modelDropdown.innerHTML = '';
+
+				if (response.models.length === 0) {
+					const option = document.createElement('option');
+					option.value = '';
+					option.textContent = 'No models found';
+					modelDropdown.appendChild(option);
+				} else {
+					response.models.forEach(model => {
+						const option = document.createElement('option');
+						option.value = model.name;
+						option.textContent = `${model.name} (${model.details.parameter_size}, ${model.details.quantization_level})`;
+						modelDropdown.appendChild(option);
+					});
+				}
+
+				if (selectedModel) {
+					modelDropdown.value = selectedModel;
+				} else if (response.models.length > 0) {
+					selectedModel = response.models[0].name;
+					modelDropdown.value = selectedModel;
+				}
+			} catch (error) {
+				modelDropdown.innerHTML = '';
+				const currentOption = document.createElement('option');
+				currentOption.value = selectedModel || '';
+				currentOption.textContent = selectedModel || 'Select model';
+				modelDropdown.appendChild(currentOption);
+				
+				new Notice('Failed to fetch models from Ollama server');
+			}
+		};
+
+		populateModelDropdown();
+
+		modelDropdown.addEventListener('change', async () => {
+			selectedModel = modelDropdown.value;
+		});
+
+		const generateResponse = async () => {
+			const prompt = promptInput.innerText.trim();
+			if (!prompt) {
+				new Notice('Please enter a prompt');
+				return;
+			}
+
+			numResponses = parseInt(responsesInput.value) || 1;
+
+			submitButton.disabled = true;
+			submitButton.textContent = 'Generating...';
+			cancelButton.style.display = 'block';
+			responsesWrapper.style.display = 'flex';
+			responsesWrapper.innerHTML = '';
+
+			abortController = new AbortController();
+
+			for (let i = 0; i < numResponses; i++) {
+				const responseContainer = responsesWrapper.createDiv({ cls: 'ollama-response-item' });
+				responseContainer.style.cssText = `
+					background: var(--background-primary);
+					border: 1px solid var(--background-modifier-border);
+					border-radius: 4px;
+					padding: 12px;
+				`;
+
+				const responseHeader = responseContainer.createDiv({ cls: 'ollama-response-header' });
+				responseHeader.style.cssText = 'display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;';
+
+				const responseTitle = responseHeader.createEl('h4', { text: `Response ${i + 1}`, cls: 'ollama-response-title' });
+				responseTitle.style.cssText = 'margin: 0; font-weight: 600; font-size: var(--font-smaller); color: var(--text-muted);';
+
+				const metaInfoContainer = responseHeader.createDiv({ cls: 'ollama-meta-info' });
+				metaInfoContainer.style.cssText = 'font-size: var(--font-smaller); color: var(--text-muted);';
+
+				const responseContent = responseContainer.createDiv({ cls: 'ollama-response-content' });
+				responseContent.style.cssText = 'min-height: 20px;';
+
+				try {
+					const outputPre = responseContent.createEl('pre');
+					outputPre.style.cssText = 'white-space: pre-wrap; word-wrap: break-word; margin: 0; font-size: var(--font-smaller); line-height: 1.5;';
+					outputPre.textContent = '';
+
+					await this.callOllamaAPIStreamWithModel(prompt, selectedModel, outputPre, abortController, metaInfoContainer, blockSettings.yamlConfig);
+				} catch (err) {
+					const errorDiv = responseContent.createDiv();
+					errorDiv.style.cssText = `color: var(--text-error);`;
+					errorDiv.textContent = `Error: ${this.escapeHtml((err as Error).message)}`;
+					
+					if ((err as Error).name === 'AbortError') {
+						break;
+					}
+
+					if (i === numResponses - 1) {
+						new Notice('Failed to generate response');
+					}
+				}
+			}
+
+			new Notice('Response generated successfully');
+
+			submitButton.disabled = false;
+			submitButton.textContent = 'Generate';
+			cancelButton.style.display = 'none';
+			abortController = null;
+		};
+
+		submitButton.addEventListener('click', generateResponse);
+
+		promptInput.addEventListener('keydown', (e) => {
+			if (e.ctrlKey && e.key === 'Enter') {
+				e.preventDefault();
+				e.stopPropagation();
+				generateResponse();
+			}
+		});
+
+		cancelButton.addEventListener('click', () => {
+			if (abortController) {
+				abortController.abort();
+				new Notice('Generation stopped');
+			}
+		});
+	}
+
+	escapeHtml(text: string): string {
+		const div = document.createElement('div');
+		div.textContent = text;
+		return div.innerHTML;
+	}
+}
+
+class OllamaSettingTab extends PluginSettingTab {
+	plugin: ObsidianOllamaTestPlugin;
+
+	constructor(app: any, plugin: ObsidianOllamaTestPlugin) {
+		super(app, plugin);
+		this.plugin = plugin;
+	}
+
+	async display(): Promise<void> {
+		const { containerEl } = this;
+		containerEl.empty();
+
+		new Setting(containerEl)
+			.setName('Ollama Model')
+			.setDesc('Select the model to use for generation')
+			.addDropdown(async (dropdown) => {
+				dropdown.addOption('', 'Loading models...');
+
+				try {
+					const response = await this.plugin.fetchModels();
+					const selectEl = dropdown.selectEl;
+					
+					while (selectEl.options.length > 0) {
+						selectEl.remove(0);
+					}
+
+					if (response.models.length === 0) {
+						const option = document.createElement('option');
+						option.value = '';
+						option.textContent = 'No models found';
+						selectEl.appendChild(option);
+					} else {
+						response.models.forEach(model => {
+							const option = document.createElement('option');
+							option.value = model.name;
+							option.textContent = `${model.name} (${model.details.parameter_size}, ${model.details.quantization_level})`;
+							selectEl.appendChild(option);
+						});
+					}
+
+					dropdown.setValue(this.plugin.settings.model);
+				} catch (error) {
+					const selectEl = dropdown.selectEl;
+					while (selectEl.options.length > 0) {
+						selectEl.remove(0);
+					}
+					
+					const currentOption = document.createElement('option');
+					currentOption.value = this.plugin.settings.model;
+					currentOption.textContent = this.plugin.settings.model;
+					selectEl.appendChild(currentOption);
+					
+					const errorOption = document.createElement('option');
+					errorOption.value = 'error';
+					errorOption.textContent = 'Failed to load models';
+					selectEl.appendChild(errorOption);
+					
+					new Notice('Failed to fetch models from Ollama server');
+				}
+
+				dropdown.onChange(async (value) => {
+					if (value === '' || value === 'error') return;
+					this.plugin.settings.model = value;
+					await this.plugin.saveSettings();
+				});
+			});
+
+		new Setting(containerEl)
+			.setName('Server URL')
+			.setDesc('The URL of your Ollama server')
+			.addText(text => text
+				.setPlaceholder('http://localhost:11434')
+				.setValue(this.plugin.settings.serverUrl)
+				.onChange(async (value) => {
+					this.plugin.settings.serverUrl = value;
+					this.plugin.clearModelsCache();
+					await this.plugin.saveSettings();
+				}));
+	}
+}

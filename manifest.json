@@ -1,0 +1,11 @@
+{
+  "id": "obsidian-ollama-test",
+  "name": "Obsidian Ollama Test",
+  "version": "1.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "Ollama AI integration plugin for Obsidian - Ask questions and get AI responses in code blocks",
+  "author": "wis-graph",
+  "authorUrl": "https://github.com/wis-graph",
+  "isDesktopOnly": false,
+  "styles": ["styles.css"]
+}

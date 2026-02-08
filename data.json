@@ -1,0 +1,4 @@
+{
+  "model": "gemma3n:e2b",
+  "serverUrl": "http://localhost:11434"
+}

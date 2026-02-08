@@ -65,7 +65,9 @@ class OllamaProvider {
         presence_penalty: config.presence_penalty
       }
     };
-    Object.keys(requestBody.options).forEach((key) => requestBody.options[key] === void 0 && delete requestBody.options[key]);
+    Object.keys(requestBody.options).forEach(
+      (key) => requestBody.options[key] === void 0 && delete requestBody.options[key]
+    );
     const response = await fetch(`${this.settings.serverUrl}/api/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -75,25 +77,21 @@ class OllamaProvider {
     if (!response.ok) {
       throw new Error(`Ollama API error: ${response.status}`);
     }
-    const reader = (_a = response.body) === null || _a === void 0 ? void 0 : _a.getReader();
-    if (!reader)
-      throw new Error("Failed to read response body");
+    const reader = (_a = response.body) == null ? void 0 : _a.getReader();
+    if (!reader) throw new Error("Failed to read response body");
     const decoder = new TextDecoder();
     let buffer = "";
     while (true) {
       const { done, value } = await reader.read();
-      if (done)
-        break;
+      if (done) break;
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
       buffer = lines.pop() || "";
       for (const line of lines) {
-        if (line.trim() === "")
-          continue;
+        if (line.trim() === "") continue;
         try {
           const data = JSON.parse(line);
-          if (data.response)
-            onChunk(data.response);
+          if (data.response) onChunk(data.response);
           if (data.done) {
             onDone({
               response: data.response,
@@ -175,24 +173,21 @@ class OpenAIProvider {
     });
     if (!response.ok) {
       const err = await response.json();
-      throw new Error(`OpenAI API error: ${((_a = err.error) === null || _a === void 0 ? void 0 : _a.message) || response.statusText}`);
+      throw new Error(`OpenAI API error: ${((_a = err.error) == null ? void 0 : _a.message) || response.statusText}`);
     }
-    const reader = (_b = response.body) === null || _b === void 0 ? void 0 : _b.getReader();
-    if (!reader)
-      throw new Error("Failed to read response body");
+    const reader = (_b = response.body) == null ? void 0 : _b.getReader();
+    if (!reader) throw new Error("Failed to read response body");
     const decoder = new TextDecoder();
     let buffer = "";
     while (true) {
       const { done, value } = await reader.read();
-      if (done)
-        break;
+      if (done) break;
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
       buffer = lines.pop() || "";
       for (const line of lines) {
         const trimmedLine = line.trim();
-        if (!trimmedLine || trimmedLine === "data: [DONE]")
-          continue;
+        if (!trimmedLine || trimmedLine === "data: [DONE]") continue;
         if (trimmedLine.startsWith("data: ")) {
           try {
             const data = JSON.parse(trimmedLine.slice(6));
@@ -208,10 +203,9 @@ class OpenAIProvider {
               });
               continue;
             }
-            const content = (_d = (_c = data.choices[0]) === null || _c === void 0 ? void 0 : _c.delta) === null || _d === void 0 ? void 0 : _d.content;
-            if (content)
-              onChunk(content);
-            if (((_e = data.choices[0]) === null || _e === void 0 ? void 0 : _e.finish_reason) && !data.usage) {
+            const content = (_d = (_c = data.choices[0]) == null ? void 0 : _c.delta) == null ? void 0 : _d.content;
+            if (content) onChunk(content);
+            if (((_e = data.choices[0]) == null ? void 0 : _e.finish_reason) && !data.usage) {
               onDone({
                 response: "",
                 done: true,
@@ -241,8 +235,7 @@ class LLMService {
   }
   getProvider(id) {
     const provider = this.providers.get(id);
-    if (!provider)
-      throw new Error(`Provider ${id} not found`);
+    if (!provider) throw new Error(`Provider ${id} not found`);
     return provider;
   }
   getEnabledProviders() {
@@ -301,11 +294,9 @@ class BlockManager {
   }
   async updateFileBlock(el, ctx, newPrompt, newYaml) {
     const sectionInfo = ctx.getSectionInfo(el);
-    if (!sectionInfo)
-      throw new Error("Could not get section info");
+    if (!sectionInfo) throw new Error("Could not get section info");
     const view = this.app.workspace.getActiveViewOfType(obsidian.MarkdownView);
-    if (!view)
-      throw new Error("No active markdown view");
+    if (!view) throw new Error("No active markdown view");
     const editor = view.editor;
     const { lineStart, lineEnd } = sectionInfo;
     const updatedBlockContent = newYaml ? `---
@@ -535,16 +526,14 @@ class OllamaBlockView {
       this.blockSettings.yamlConfig.model = "";
       const newYaml = this.manager.generateYamlFromConfig(this.blockSettings.yamlConfig);
       this.manager.updateFileBlock(this.el, this.ctx, promptInput.innerText.trim(), newYaml);
-      if (configTextarea)
-        configTextarea.value = newYaml;
+      if (configTextarea) configTextarea.value = newYaml;
       await populateModels();
     });
     modelDropdown.addEventListener("change", () => {
       this.blockSettings.yamlConfig.model = modelDropdown.value;
       const newYaml = this.manager.generateYamlFromConfig(this.blockSettings.yamlConfig);
       this.manager.updateFileBlock(this.el, this.ctx, promptInput.innerText.trim(), newYaml);
-      if (configTextarea)
-        configTextarea.value = newYaml;
+      if (configTextarea) configTextarea.value = newYaml;
     });
     if (copyButton) {
       copyButton.addEventListener("click", async () => {
@@ -578,8 +567,7 @@ class OllamaBlockView {
       this.blockSettings.yamlConfig.num_responses = val;
       const newYaml = this.manager.generateYamlFromConfig(this.blockSettings.yamlConfig);
       this.manager.updateFileBlock(this.el, this.ctx, promptInput.innerText.trim(), newYaml);
-      if (configTextarea)
-        configTextarea.value = newYaml;
+      if (configTextarea) configTextarea.value = newYaml;
     }, 1e3);
     responsesSlider.addEventListener("input", () => {
       responsesInput.value = responsesSlider.value;
@@ -591,12 +579,11 @@ class OllamaBlockView {
     });
     const startGeneration = async () => {
       if (isGenerating) {
-        abortController === null || abortController === void 0 ? void 0 : abortController.abort();
+        abortController == null ? void 0 : abortController.abort();
         return;
       }
       const prompt = promptInput.innerText.trim();
-      if (!prompt)
-        return;
+      if (!prompt) return;
       isGenerating = true;
       updateSubmitButtonState();
       const count = parseInt(responsesInput.value) || 1;
@@ -608,26 +595,34 @@ class OllamaBlockView {
       try {
         for (let i = 0; i < count; i++) {
           const item = responsesWrapper.createDiv({ cls: "ollama-response-item" });
-          item.style.cssText = "background: var(--background-primary); border: 1px solid var(--background-modifier-border); border-radius: 8px; padding: 12px; margin-bottom: 8px;";
+          item.style.cssText = "background: var(--background-primary); border: 1px solid var(--background-modifier-border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; position: relative; min-height: 42px;";
           const content = item.createDiv();
           const outputPre = content.createEl("pre", { cls: "ollama-output" });
-          outputPre.style.cssText = "white-space: pre-wrap; font-size: var(--font-smaller); font-family: var(--font-monospace);";
+          outputPre.style.cssText = "white-space: pre-wrap; font-size: var(--font-smaller); font-family: var(--font-monospace); margin: 0; padding-right: 30px; line-height: 1.4;";
+          const copyRespButton = item.createEl("button", { cls: "ollama-response-copy-button" });
+          obsidian.setIcon(copyRespButton, "copy");
+          copyRespButton.style.cssText = "position: absolute; top: 6px; right: 6px; width: 28px; height: 28px; border: none; border-radius: 4px; cursor: pointer; background: var(--background-modifier-border); opacity: 0.1; transition: all 0.2s; display: flex; align-items: center; justify-content: center;";
+          copyRespButton.title = "Copy response";
+          const copyIcon = copyRespButton.querySelector("svg");
+          if (copyIcon) {
+            copyIcon.style.width = "16px";
+            copyIcon.style.height = "16px";
+          }
+          item.addEventListener("mouseenter", () => copyRespButton.style.opacity = "0.5");
+          item.addEventListener("mouseleave", () => copyRespButton.style.opacity = "0.1");
+          copyRespButton.addEventListener("mouseenter", () => {
+            copyRespButton.style.opacity = "1";
+            copyRespButton.style.background = "var(--background-modifier-border-hover)";
+          });
+          copyRespButton.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            await navigator.clipboard.writeText(outputPre.textContent || "");
+            new obsidian.Notice("Response copied");
+          });
+          const statsDiv = item.createDiv({ cls: "ollama-stats" });
+          statsDiv.style.cssText = "position: absolute; bottom: 4px; right: 8px; font-size: 9px; color: var(--text-muted); opacity: 0.6; pointer-events: none;";
           try {
             let statsShown = false;
-            const footerContainer = item.createDiv({ cls: "ollama-response-footer" });
-            footerContainer.style.cssText = "display: flex; justify-content: space-between; align-items: flex-end; margin-top: 8px; border-top: 1px solid var(--background-modifier-border); padding-top: 4px; position: relative;";
-            const copyRespButton = footerContainer.createEl("button", { cls: "ollama-response-copy-button" });
-            obsidian.setIcon(copyRespButton, "copy");
-            copyRespButton.style.cssText = "padding: 4px; border: none; border-radius: 4px; cursor: pointer; background: transparent; opacity: 0.3; transition: opacity 0.2s; display: flex; align-items: center; justify-content: center;";
-            copyRespButton.title = "Copy response";
-            copyRespButton.addEventListener("mouseenter", () => copyRespButton.style.opacity = "1");
-            copyRespButton.addEventListener("mouseleave", () => copyRespButton.style.opacity = "0.3");
-            copyRespButton.addEventListener("click", async () => {
-              await navigator.clipboard.writeText(outputPre.textContent || "");
-              new obsidian.Notice("Response copied");
-            });
-            const statsDiv = footerContainer.createDiv({ cls: "ollama-stats" });
-            statsDiv.style.cssText = "font-size: 10px; color: var(--text-muted);";
             await provider.streamResponse(prompt, modelDropdown.value, this.blockSettings.yamlConfig, abortController, (chunk) => {
               outputPre.textContent += chunk;
             }, (final) => {
@@ -635,12 +630,11 @@ class OllamaBlockView {
                 statsShown = true;
                 const durationSec = (final.total_duration / 1e9).toFixed(2);
                 const totalTokens = (final.prompt_eval_count || 0) + (final.eval_count || 0);
-                statsDiv.textContent = `Tokens: ${totalTokens} | Time: ${durationSec}s`;
+                statsDiv.textContent = `${totalTokens} tkn | ${durationSec}s`;
               }
             });
           } catch (e) {
-            if (e.name === "AbortError")
-              break;
+            if (e.name === "AbortError") break;
             content.createDiv({ text: `Error: ${e.message}` }).style.color = "var(--text-error)";
             break;
           }
@@ -676,11 +670,9 @@ class OllamaBlockView {
     });
     const trackFocus = () => {
       const section = this.ctx.getSectionInfo(this.el);
-      if (!section)
-        return;
+      if (!section) return;
       const selection = window.getSelection();
-      if (!selection || selection.rangeCount === 0)
-        return;
+      if (!selection || selection.rangeCount === 0) return;
       const range = selection.getRangeAt(0);
       const preRange = range.cloneRange();
       preRange.selectNodeContents(promptInput);
@@ -719,8 +711,7 @@ class OllamaBlockView {
             currentOffset += len;
           } else {
             for (let i = 0; i < node.childNodes.length; i++) {
-              if (findNode(node.childNodes[i]))
-                return true;
+              if (findNode(node.childNodes[i])) return true;
             }
           }
           return false;
@@ -729,13 +720,13 @@ class OllamaBlockView {
         if (targetNode) {
           range.setStart(targetNode, targetOffset);
           range.collapse(true);
-          selection === null || selection === void 0 ? void 0 : selection.removeAllRanges();
-          selection === null || selection === void 0 ? void 0 : selection.addRange(range);
+          selection == null ? void 0 : selection.removeAllRanges();
+          selection == null ? void 0 : selection.addRange(range);
         } else {
           range.selectNodeContents(promptInput);
           range.collapse(false);
-          selection === null || selection === void 0 ? void 0 : selection.removeAllRanges();
-          selection === null || selection === void 0 ? void 0 : selection.addRange(range);
+          selection == null ? void 0 : selection.removeAllRanges();
+          selection == null ? void 0 : selection.addRange(range);
         }
       }
     }

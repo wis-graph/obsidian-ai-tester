@@ -311,30 +311,59 @@ export class OllamaBlockView {
             try {
                 for (let i = 0; i < count; i++) {
                     const item = responsesWrapper.createDiv({ cls: 'ollama-response-item' });
-                    item.style.cssText = 'background: var(--background-primary); border: 1px solid var(--background-modifier-border); border-radius: 8px; padding: 12px; margin-bottom: 8px;';
+                    item.style.cssText = 'background: var(--background-primary); border: 1px solid var(--background-modifier-border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; position: relative; min-height: 42px;';
+
                     const content = item.createDiv();
                     const outputPre = content.createEl('pre', { cls: 'ollama-output' });
-                    outputPre.style.cssText = 'white-space: pre-wrap; font-size: var(--font-smaller); font-family: var(--font-monospace);';
+                    outputPre.style.cssText = 'white-space: pre-wrap; font-size: var(--font-smaller); font-family: var(--font-monospace); margin: 0; padding-right: 30px; line-height: 1.4;';
+
+                    const copyRespButton = item.createEl('button', { cls: 'ollama-response-copy-button' });
+                    setIcon(copyRespButton, 'copy');
+                    copyRespButton.style.cssText = 'position: absolute; top: 8px; right: 8px; width: 30px; height: 30px; border: none; border-radius: 50%; cursor: pointer; background: var(--background-modifier-border); opacity: 0.15; transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); display: flex; align-items: center; justify-content: center; color: var(--text-normal); padding: 0;';
+                    copyRespButton.title = 'Copy response';
+                    const copyIcon = copyRespButton.querySelector('svg');
+                    if (copyIcon) { copyIcon.style.width = '18px'; copyIcon.style.height = '18px'; }
+
+                    item.addEventListener('mouseenter', () => {
+                        if (copyRespButton.style.opacity !== '1') copyRespButton.style.opacity = '0.4';
+                    });
+                    item.addEventListener('mouseleave', () => {
+                        if (copyRespButton.style.opacity !== '1') copyRespButton.style.opacity = '0.15';
+                    });
+
+                    copyRespButton.addEventListener('mouseenter', () => {
+                        copyRespButton.style.opacity = '1';
+                        copyRespButton.style.background = 'var(--interactive-accent)';
+                        copyRespButton.style.color = 'var(--text-on-accent)';
+                        copyRespButton.style.transform = 'scale(1.1)';
+                    });
+                    copyRespButton.addEventListener('mouseleave', () => {
+                        copyRespButton.style.opacity = '0.4';
+                        copyRespButton.style.background = 'var(--background-modifier-border)';
+                        copyRespButton.style.color = 'var(--text-normal)';
+                        copyRespButton.style.transform = 'scale(1)';
+                    });
+
+                    copyRespButton.addEventListener('click', async (e: MouseEvent) => {
+                        e.stopPropagation();
+                        await navigator.clipboard.writeText(outputPre.textContent || '');
+                        new Notice('Response copied');
+
+                        setIcon(copyRespButton, 'check');
+                        const checkIcon = copyRespButton.querySelector('svg');
+                        if (checkIcon) { checkIcon.style.width = '18px'; checkIcon.style.height = '18px'; }
+                        setTimeout(() => {
+                            setIcon(copyRespButton, 'copy');
+                            const resetIcon = copyRespButton.querySelector('svg');
+                            if (resetIcon) { resetIcon.style.width = '18px'; resetIcon.style.height = '18px'; }
+                        }, 2000);
+                    });
+
+                    const statsDiv = item.createDiv({ cls: 'ollama-stats' });
+                    statsDiv.style.cssText = 'position: absolute; bottom: 6px; right: 10px; font-size: 9px; color: var(--text-muted); opacity: 0.5; pointer-events: none;';
 
                     try {
                         let statsShown = false;
-                        const footerContainer = item.createDiv({ cls: 'ollama-response-footer' });
-                        footerContainer.style.cssText = 'display: flex; justify-content: space-between; align-items: flex-end; margin-top: 8px; border-top: 1px solid var(--background-modifier-border); padding-top: 4px; position: relative;';
-
-                        const copyRespButton = footerContainer.createEl('button', { cls: 'ollama-response-copy-button' });
-                        setIcon(copyRespButton, 'copy');
-                        copyRespButton.style.cssText = 'padding: 4px; border: none; border-radius: 4px; cursor: pointer; background: transparent; opacity: 0.3; transition: opacity 0.2s; display: flex; align-items: center; justify-content: center;';
-                        copyRespButton.title = 'Copy response';
-                        copyRespButton.addEventListener('mouseenter', () => copyRespButton.style.opacity = '1');
-                        copyRespButton.addEventListener('mouseleave', () => copyRespButton.style.opacity = '0.3');
-                        copyRespButton.addEventListener('click', async () => {
-                            await navigator.clipboard.writeText(outputPre.textContent || '');
-                            new Notice('Response copied');
-                        });
-
-                        const statsDiv = footerContainer.createDiv({ cls: 'ollama-stats' });
-                        statsDiv.style.cssText = 'font-size: 10px; color: var(--text-muted);';
-
                         await provider.streamResponse(prompt, modelDropdown.value, this.blockSettings.yamlConfig, abortController, (chunk) => {
                             outputPre.textContent += chunk;
                         }, (final) => {
@@ -342,7 +371,7 @@ export class OllamaBlockView {
                                 statsShown = true;
                                 const durationSec = (final.total_duration / 1e9).toFixed(2);
                                 const totalTokens = (final.prompt_eval_count || 0) + (final.eval_count || 0);
-                                statsDiv.textContent = `Tokens: ${totalTokens} | Time: ${durationSec}s`;
+                                statsDiv.textContent = `${totalTokens} tkn | ${durationSec}s`;
                             }
                         });
                     } catch (e) {

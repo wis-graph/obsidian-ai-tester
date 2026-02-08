@@ -1,5 +1,5 @@
 {
-  "activeProvider": "ollama",
+  "activeProvider": "openai",
   "ollama": {
     "serverUrl": "http://localhost:11434",
     "model": "llama3"

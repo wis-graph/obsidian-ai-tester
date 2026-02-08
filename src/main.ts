@@ -20,7 +20,7 @@ export default class AITesterPlugin extends Plugin {
 
 		this.addSettingTab(new LLMSettingTab(this.app, this));
 
-		this.registerMarkdownCodeBlockProcessor('ollama', (source, el, ctx) => {
+		this.registerMarkdownCodeBlockProcessor('ai-tester', (source, el, ctx) => {
 			const blockSettings = this.blockManager.parseBlock(source);
 			const view = new OllamaBlockView(el, this.llmService, this.blockManager, ctx, blockSettings);
 			view.render();

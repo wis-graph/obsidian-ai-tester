@@ -103,6 +103,26 @@ export class OllamaBlockView {
             copyButton.style.transform = 'scale(1)';
         });
 
+        const saveButton = actionButtons.createEl('button', { cls: 'ollama-save-button' });
+        setIcon(saveButton, 'save');
+        saveButton.style.cssText = 'width: 42px; height: 42px; border: none; border-radius: 50%; cursor: pointer; background: var(--background-modifier-border); opacity: 0.9; transition: all 0.2s; display: flex; align-items: center; justify-content: center; color: var(--text-normal);';
+        saveButton.title = 'Save prompt (Ctrl+S)';
+        const saveIcon = saveButton.querySelector('svg');
+        if (saveIcon) { saveIcon.style.width = '24px'; saveIcon.style.height = '24px'; }
+
+        saveButton.addEventListener('mouseenter', () => {
+            saveButton.style.opacity = '1';
+            saveButton.style.background = 'var(--interactive-accent)';
+            saveButton.style.color = 'var(--text-on-accent)';
+            saveButton.style.transform = 'scale(1.05)';
+        });
+        saveButton.addEventListener('mouseleave', () => {
+            saveButton.style.opacity = '0.9';
+            saveButton.style.background = 'var(--background-modifier-border)';
+            saveButton.style.color = 'var(--text-normal)';
+            saveButton.style.transform = 'scale(1)';
+        });
+
         const clearButton = actionButtons.createEl('button', { cls: 'ollama-clear-button' });
         setIcon(clearButton, 'trash');
         clearButton.style.cssText = 'width: 42px; height: 42px; border: none; border-radius: 50%; cursor: pointer; background: var(--background-modifier-border); opacity: 0.9; transition: all 0.2s; display: flex; align-items: center; justify-content: center; color: var(--text-normal);';
@@ -129,26 +149,6 @@ export class OllamaBlockView {
         submitButton.title = 'Generate (Enter)';
         const submitIcon = submitButton.querySelector('svg');
         if (submitIcon) { submitIcon.style.width = '20px'; submitIcon.style.height = '20px'; }
-
-        const saveButton = actionButtons.createEl('button', { cls: 'ollama-save-button' });
-        setIcon(saveButton, 'save');
-        saveButton.style.cssText = 'width: 42px; height: 42px; border: none; border-radius: 50%; cursor: pointer; background: var(--background-modifier-border); opacity: 0.9; transition: all 0.2s; display: flex; align-items: center; justify-content: center; color: var(--text-normal);';
-        saveButton.title = 'Save prompt (Ctrl+S)';
-        const saveIcon = saveButton.querySelector('svg');
-        if (saveIcon) { saveIcon.style.width = '24px'; saveIcon.style.height = '24px'; }
-
-        saveButton.addEventListener('mouseenter', () => {
-            saveButton.style.opacity = '1';
-            saveButton.style.background = 'var(--interactive-accent)';
-            saveButton.style.color = 'var(--text-on-accent)';
-            saveButton.style.transform = 'scale(1.05)';
-        });
-        saveButton.addEventListener('mouseleave', () => {
-            saveButton.style.opacity = '0.9';
-            saveButton.style.background = 'var(--background-modifier-border)';
-            saveButton.style.color = 'var(--text-normal)';
-            saveButton.style.transform = 'scale(1)';
-        });
 
         const buttonContainer = container.createDiv({ cls: 'ollama-button-container' });
         buttonContainer.style.cssText = 'display: flex; gap: 10px; align-items: center; justify-content: flex-start;';

@@ -1,10 +1,19 @@
 "use strict";
 const obsidian = require("obsidian");
 const DEFAULT_SETTINGS = {
-  model: "llama2",
-  serverUrl: "http://localhost:11434"
+  activeProvider: "ollama",
+  ollama: {
+    serverUrl: "http://localhost:11434",
+    model: "llama3"
+  },
+  openai: {
+    apiKey: "",
+    baseUrl: "https://api.openai.com/v1",
+    model: "gpt-4o"
+  }
 };
 const DEFAULT_BLOCK_CONFIG = {
+  provider: "ollama",
   model: "",
   temperature: 0.7,
   max_tokens: 4096,
@@ -14,14 +23,13 @@ const DEFAULT_BLOCK_CONFIG = {
   presence_penalty: 0,
   num_responses: 1
 };
-class OllamaServiceImpl {
+class OllamaProvider {
   constructor(settings) {
-    this.modelsCache = null;
+    this.id = "ollama";
+    this.name = "Ollama";
     this.settings = settings;
   }
   async fetchModels() {
-    if (this.modelsCache)
-      return this.modelsCache;
     try {
       const response = await obsidian.requestUrl({
         url: `${this.settings.serverUrl}/api/tags`,
@@ -30,32 +38,31 @@ class OllamaServiceImpl {
       if (response.status !== 200) {
         throw new Error(`Failed to fetch models: ${response.status}`);
       }
-      this.modelsCache = response.json;
-      return this.modelsCache;
+      const ollamaRes = response.json;
+      return {
+        models: ollamaRes.models.map((m) => ({
+          id: m.name,
+          name: m.name
+        }))
+      };
     } catch (error) {
-      console.error("Error fetching models:", error);
+      console.error("Error fetching models from Ollama:", error);
       throw error;
     }
   }
-  clearCache() {
-    this.modelsCache = null;
-  }
-  getSettings() {
-    return this.settings;
-  }
-  async streamOllamaResponse(prompt, model, yamlConfig, abortController, onChunk, onDone) {
+  async streamResponse(prompt, model, config, abortController, onChunk, onDone) {
     var _a;
     const requestBody = {
       model,
       prompt,
       stream: true,
       options: {
-        temperature: yamlConfig.temperature,
-        num_predict: yamlConfig.max_tokens,
-        stop: yamlConfig.stop_sequences,
-        top_p: yamlConfig.top_p,
-        frequency_penalty: yamlConfig.frequency_penalty,
-        presence_penalty: yamlConfig.presence_penalty
+        temperature: config.temperature,
+        num_predict: config.max_tokens,
+        stop: config.stop_sequences,
+        top_p: config.top_p,
+        frequency_penalty: config.frequency_penalty,
+        presence_penalty: config.presence_penalty
       }
     };
     Object.keys(requestBody.options).forEach((key) => requestBody.options[key] === void 0 && delete requestBody.options[key]);
@@ -87,8 +94,16 @@ class OllamaServiceImpl {
           const data = JSON.parse(line);
           if (data.response)
             onChunk(data.response);
-          if (data.done)
-            onDone(data);
+          if (data.done) {
+            onDone({
+              response: data.response,
+              done: true,
+              model: data.model,
+              total_duration: data.total_duration,
+              prompt_eval_count: data.prompt_eval_count,
+              eval_count: data.eval_count
+            });
+          }
         } catch (e) {
           console.error("Error parsing JSON line:", line, e);
         }
@@ -96,13 +111,159 @@ class OllamaServiceImpl {
     }
   }
 }
+class OpenAIProvider {
+  constructor(settings) {
+    this.id = "openai";
+    this.name = "OpenAI";
+    this.settings = settings;
+  }
+  async fetchModels() {
+    if (!this.settings.apiKey) {
+      return {
+        models: [
+          { id: "gpt-4o", name: "GPT-4o" },
+          { id: "gpt-4o-mini", name: "GPT-4o mini" },
+          { id: "gpt-4-turbo", name: "GPT-4 Turbo" },
+          { id: "gpt-3.5-turbo", name: "GPT-3.5 Turbo" }
+        ]
+      };
+    }
+    try {
+      const response = await fetch(`${this.settings.baseUrl}/models`, {
+        headers: {
+          "Authorization": `Bearer ${this.settings.apiKey}`
+        }
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to fetch models: ${response.status}`);
+      }
+      const data = await response.json();
+      return {
+        models: data.data.filter((m) => m.id.startsWith("gpt-")).map((m) => ({
+          id: m.id,
+          name: m.id
+        }))
+      };
+    } catch (error) {
+      console.error("Error fetching models from OpenAI:", error);
+      return { models: [{ id: "gpt-4o", name: "GPT-4o" }] };
+    }
+  }
+  async streamResponse(prompt, model, config, abortController, onChunk, onDone) {
+    var _a, _b, _c, _d, _e;
+    const startTime = Date.now();
+    const requestBody = {
+      model: model || this.settings.model,
+      messages: [{ role: "user", content: prompt }],
+      stream: true,
+      stream_options: { include_usage: true },
+      temperature: config.temperature,
+      max_tokens: config.max_tokens,
+      stop: config.stop_sequences,
+      top_p: config.top_p,
+      frequency_penalty: config.frequency_penalty,
+      presence_penalty: config.presence_penalty
+    };
+    const response = await fetch(`${this.settings.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${this.settings.apiKey}`
+      },
+      body: JSON.stringify(requestBody),
+      signal: abortController.signal
+    });
+    if (!response.ok) {
+      const err = await response.json();
+      throw new Error(`OpenAI API error: ${((_a = err.error) === null || _a === void 0 ? void 0 : _a.message) || response.statusText}`);
+    }
+    const reader = (_b = response.body) === null || _b === void 0 ? void 0 : _b.getReader();
+    if (!reader)
+      throw new Error("Failed to read response body");
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done)
+        break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        const trimmedLine = line.trim();
+        if (!trimmedLine || trimmedLine === "data: [DONE]")
+          continue;
+        if (trimmedLine.startsWith("data: ")) {
+          try {
+            const data = JSON.parse(trimmedLine.slice(6));
+            if (data.usage) {
+              onDone({
+                response: "",
+                done: true,
+                model,
+                prompt_eval_count: data.usage.prompt_tokens,
+                eval_count: data.usage.completion_tokens,
+                total_duration: (Date.now() - startTime) * 1e6
+                // Convert to ns to match Ollama
+              });
+              continue;
+            }
+            const content = (_d = (_c = data.choices[0]) === null || _c === void 0 ? void 0 : _c.delta) === null || _d === void 0 ? void 0 : _d.content;
+            if (content)
+              onChunk(content);
+            if (((_e = data.choices[0]) === null || _e === void 0 ? void 0 : _e.finish_reason) && !data.usage) {
+              onDone({
+                response: "",
+                done: true,
+                model: data.model || model,
+                total_duration: (Date.now() - startTime) * 1e6
+              });
+            }
+          } catch (e) {
+            console.error("Error parsing OpenAI stream chunk:", trimmedLine, e);
+          }
+        }
+      }
+    }
+  }
+}
+class LLMService {
+  constructor(settings) {
+    this.providers = /* @__PURE__ */ new Map();
+    this.settings = settings;
+    this.initializeProviders();
+  }
+  initializeProviders() {
+    const ollama = new OllamaProvider(this.settings.ollama);
+    const openai = new OpenAIProvider(this.settings.openai);
+    this.providers.set(ollama.id, ollama);
+    this.providers.set(openai.id, openai);
+  }
+  getProvider(id) {
+    const provider = this.providers.get(id);
+    if (!provider)
+      throw new Error(`Provider ${id} not found`);
+    return provider;
+  }
+  getEnabledProviders() {
+    return Array.from(this.providers.values());
+  }
+  getSettings() {
+    return this.settings;
+  }
+  updateSettings(settings) {
+    this.settings = settings;
+    this.initializeProviders();
+  }
+}
 class BlockManager {
   constructor(app) {
+    this.sessionFocus = { lineStart: null, ch: null, file: null };
     this.app = app;
   }
   parseBlock(source) {
     const trimmedSource = source.trim();
-    const yamlMatch = trimmedSource.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+    const yamlMatch = trimmedSource.match(/^---\n([\s\S]*?)\n---(?:\n([\s\S]*)|$)/);
     let config = {
       yamlConfig: { ...DEFAULT_BLOCK_CONFIG },
       prompt: trimmedSource,
@@ -113,10 +274,10 @@ class BlockManager {
       try {
         const parsedYaml = obsidian.parseYaml(yamlMatch[1]);
         config.yamlConfig = { ...DEFAULT_BLOCK_CONFIG, ...parsedYaml };
-        config.prompt = yamlMatch[2].trim();
+        config.prompt = (yamlMatch[2] || "").trim();
       } catch (error) {
         console.error("Error parsing YAML:", error);
-        new obsidian.Notice("YAML parsing error, using default settings");
+        config.hasYaml = false;
       }
     }
     return config;
@@ -154,7 +315,6 @@ ${newPrompt}` : newPrompt;
     const startPos = { line: lineStart + 1, ch: 0 };
     const endPos = { line: lineEnd, ch: 0 };
     editor.replaceRange(updatedBlockContent + "\n", startPos, endPos);
-    new obsidian.Notice("Block synced to file");
   }
   generateYamlFromConfig(config) {
     const lines = [];
@@ -191,6 +351,7 @@ class OllamaBlockView {
     this.el.empty();
     this.createLayout();
     this.initializeController();
+    this.restoreFocus();
   }
   createLayout() {
     const container = this.el.createDiv({ cls: "ollama-container" });
@@ -199,18 +360,25 @@ class OllamaBlockView {
     headerRow.style.cssText = "display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;";
     headerRow.createEl("label", { text: "Prompt:", cls: "setting-item-name" }).style.cssText = "font-weight: 600; margin-right: 16px;";
     const controlsRow = headerRow.createDiv({ cls: "ollama-controls" });
-    controlsRow.style.cssText = "display: flex; align-items: center; gap: 16px;";
+    controlsRow.style.cssText = "display: flex; align-items: center; gap: 8px;";
+    const providerDropdown = controlsRow.createEl("select", { cls: "ollama-provider-dropdown dropdown" });
+    providerDropdown.style.cssText = "padding: 4px 12px; border: 1px solid var(--background-modifier-border); border-radius: 4px; background: var(--background-primary); color: var(--text-normal); font-size: var(--font-smaller); cursor: pointer;";
+    const providers = this.service.getEnabledProviders();
+    providers.forEach((p) => {
+      providerDropdown.createEl("option", { value: p.id, text: p.name });
+    });
+    providerDropdown.value = this.blockSettings.yamlConfig.provider || this.service.getSettings().activeProvider;
     const modelLabel = controlsRow.createEl("label", { text: "Model:", cls: "setting-item-name" });
-    modelLabel.style.cssText = "font-size: var(--font-smaller); font-weight: 500;";
+    modelLabel.style.cssText = "font-size: var(--font-smaller); font-weight: 500; font-family: var(--font-interface); margin-left: 8px;";
     const modelDropdown = controlsRow.createEl("select", { cls: "ollama-model-dropdown dropdown" });
-    modelDropdown.style.cssText = "padding: 4px 32px 4px 12px; border: 1px solid var(--background-modifier-border); border-radius: 4px; background: var(--background-primary); color: var(--text-normal); font-size: var(--font-smaller); line-height: 1.5; cursor: pointer; min-width: 160px; width: fit-content; max-width: 400px; height: auto;";
+    modelDropdown.style.cssText = "padding: 4px 32px 4px 12px; border: 1px solid var(--background-modifier-border); border-radius: 4px; background: var(--background-primary); color: var(--text-normal); font-size: var(--font-smaller); line-height: 1.5; cursor: pointer; min-width: 140px; width: fit-content; max-width: 300px; height: auto;";
     let advancedButton = null;
     let configTextarea = null;
     let configDisplay = null;
     if (this.blockSettings.hasYaml) {
       advancedButton = controlsRow.createEl("button", { cls: "ollama-advanced-button" });
       obsidian.setIcon(advancedButton, "settings");
-      advancedButton.style.cssText = "padding: 4px; border: none; border-radius: 4px; cursor: pointer; background: transparent; display: flex; align-items: center; justify-content: center;";
+      advancedButton.style.cssText = "padding: 4px; border: none; border-radius: 4px; cursor: pointer; background: transparent; display: flex; align-items: center; justify-content: center; margin-left: 4px;";
       advancedButton.title = "Advanced Settings";
       configDisplay = container.createDiv({ cls: "ollama-config-display" });
       configDisplay.style.cssText = "display: none; background: var(--background-primary); border: 1px solid var(--background-modifier-border); border-radius: 4px; padding: 12px; margin-bottom: 12px; font-size: var(--font-smaller);";
@@ -220,21 +388,85 @@ class OllamaBlockView {
     }
     const promptContainer = container.createDiv({ cls: "ollama-prompt-container" });
     promptContainer.style.cssText = "position: relative; width: 100%; margin-bottom: 12px;";
-    const promptInput = promptContainer.createEl("div", { cls: "ollama-prompt-input", attr: { contenteditable: "true", "data-placeholder": "Enter prompt... (Ctrl+Enter)" } });
+    const promptInput = promptContainer.createEl("div", { cls: "ollama-prompt-input", attr: { contenteditable: "true", "data-placeholder": "Enter prompt..." } });
     promptInput.innerHTML = this.blockSettings.prompt;
-    promptInput.style.cssText = "width: 100%; padding: 8px; padding-bottom: 30px; border: 1px solid var(--background-modifier-border); border-radius: 4px; background: var(--background-primary); color: var(--text-normal); overflow: auto; min-height: 80px; white-space: pre-wrap; word-wrap: break-word;";
-    const copyButton = promptContainer.createEl("button", { cls: "ollama-copy-button" });
+    promptInput.style.cssText = "width: 100%; padding: 12px; padding-bottom: 45px; border: 1px solid var(--background-modifier-border); border-radius: 8px; background: var(--background-primary); color: var(--text-normal); overflow: auto; min-height: 100px; white-space: pre-wrap; word-wrap: break-word; outline: none; transition: border-color 0.2s;";
+    promptInput.addEventListener("focus", () => promptInput.style.borderColor = "var(--interactive-accent)");
+    promptInput.addEventListener("blur", () => promptInput.style.borderColor = "var(--background-modifier-border)");
+    const actionButtons = promptContainer.createDiv({ cls: "ollama-action-buttons" });
+    actionButtons.style.cssText = "position: absolute; bottom: 10px; right: 10px; display: flex; gap: 8px; align-items: center;";
+    const copyButton = actionButtons.createEl("button", { cls: "ollama-copy-button" });
     obsidian.setIcon(copyButton, "copy");
-    copyButton.style.cssText = "position: absolute; bottom: 8px; right: 8px; padding: 4px; border: none; border-radius: 4px; cursor: pointer; background: transparent; opacity: 0.6; transition: opacity 0.2s; display: flex; align-items: center; justify-content: center;";
+    copyButton.style.cssText = "width: 42px; height: 42px; border: none; border-radius: 50%; cursor: pointer; background: var(--background-modifier-border); opacity: 0.9; transition: all 0.2s; display: flex; align-items: center; justify-content: center; color: var(--text-normal);";
     copyButton.title = "Copy prompt";
-    copyButton.addEventListener("mouseenter", () => copyButton.style.opacity = "1");
-    copyButton.addEventListener("mouseleave", () => copyButton.style.opacity = "0.6");
+    const copyIcon = copyButton.querySelector("svg");
+    if (copyIcon) {
+      copyIcon.style.width = "28px";
+      copyIcon.style.height = "28px";
+    }
+    copyButton.addEventListener("mouseenter", () => {
+      copyButton.style.opacity = "1";
+      copyButton.style.background = "var(--background-modifier-border-hover)";
+      copyButton.style.transform = "scale(1.05)";
+    });
+    copyButton.addEventListener("mouseleave", () => {
+      copyButton.style.opacity = "0.9";
+      copyButton.style.background = "var(--background-modifier-border)";
+      copyButton.style.transform = "scale(1)";
+    });
+    const clearButton = actionButtons.createEl("button", { cls: "ollama-clear-button" });
+    obsidian.setIcon(clearButton, "trash");
+    clearButton.style.cssText = "width: 42px; height: 42px; border: none; border-radius: 50%; cursor: pointer; background: var(--background-modifier-border); opacity: 0.9; transition: all 0.2s; display: flex; align-items: center; justify-content: center; color: var(--text-normal);";
+    clearButton.title = "Clear prompt";
+    const clearIcon = clearButton.querySelector("svg");
+    if (clearIcon) {
+      clearIcon.style.width = "28px";
+      clearIcon.style.height = "28px";
+    }
+    clearButton.addEventListener("mouseenter", () => {
+      clearButton.style.opacity = "1";
+      clearButton.style.background = "var(--text-error)";
+      clearButton.style.color = "white";
+      clearButton.style.transform = "scale(1.05)";
+    });
+    clearButton.addEventListener("mouseleave", () => {
+      clearButton.style.opacity = "0.9";
+      clearButton.style.background = "var(--background-modifier-border)";
+      clearButton.style.color = "var(--text-normal)";
+      clearButton.style.transform = "scale(1)";
+    });
+    const submitButton = actionButtons.createEl("button", { cls: "ollama-submit-button mod-cta" });
+    obsidian.setIcon(submitButton, "send");
+    submitButton.style.cssText = "width: 42px; height: 42px; border: none; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.2s; padding: 0;";
+    submitButton.title = "Generate (Enter)";
+    const submitIcon = submitButton.querySelector("svg");
+    if (submitIcon) {
+      submitIcon.style.width = "20px";
+      submitIcon.style.height = "20px";
+    }
+    const saveButton = actionButtons.createEl("button", { cls: "ollama-save-button" });
+    obsidian.setIcon(saveButton, "save");
+    saveButton.style.cssText = "width: 42px; height: 42px; border: none; border-radius: 50%; cursor: pointer; background: var(--background-modifier-border); opacity: 0.9; transition: all 0.2s; display: flex; align-items: center; justify-content: center; color: var(--text-normal);";
+    saveButton.title = "Save prompt (Ctrl+S)";
+    const saveIcon = saveButton.querySelector("svg");
+    if (saveIcon) {
+      saveIcon.style.width = "24px";
+      saveIcon.style.height = "24px";
+    }
+    saveButton.addEventListener("mouseenter", () => {
+      saveButton.style.opacity = "1";
+      saveButton.style.background = "var(--interactive-accent)";
+      saveButton.style.color = "var(--text-on-accent)";
+      saveButton.style.transform = "scale(1.05)";
+    });
+    saveButton.addEventListener("mouseleave", () => {
+      saveButton.style.opacity = "0.9";
+      saveButton.style.background = "var(--background-modifier-border)";
+      saveButton.style.color = "var(--text-normal)";
+      saveButton.style.transform = "scale(1)";
+    });
     const buttonContainer = container.createDiv({ cls: "ollama-button-container" });
     buttonContainer.style.cssText = "display: flex; gap: 10px; align-items: center; justify-content: flex-start;";
-    const submitButton = buttonContainer.createEl("button", { text: "Generate", cls: "mod-cta" });
-    submitButton.style.cssText = "padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-weight: 600;";
-    const cancelButton = buttonContainer.createEl("button", { text: "Stop", cls: "mod-warning" });
-    cancelButton.style.cssText = "padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; display: none;";
     const responsesContainer = buttonContainer.createDiv({ cls: "ollama-responses-control" });
     responsesContainer.style.cssText = "display: flex; align-items: center; gap: 8px; margin-left: auto;";
     responsesContainer.createEl("label", { text: "Responses:", cls: "setting-item-name" }).style.cssText = "font-size: var(--font-smaller);";
@@ -245,36 +477,74 @@ class OllamaBlockView {
     responsesInput.style.cssText = "width: 50px; padding: 4px 8px; border: 1px solid var(--background-modifier-border); border-radius: 4px; background: var(--background-primary); color: var(--text-normal); font-size: var(--font-smaller);";
     const responsesWrapper = container.createDiv({ cls: "ollama-responses-wrapper" });
     responsesWrapper.style.cssText = "margin-top: 12px; display: none; flex-direction: column; gap: 8px;";
-    this.components = { modelDropdown, advancedButton, configDisplay, configTextarea, responsesSlider, responsesInput, promptInput, copyButton, submitButton, cancelButton, responsesWrapper };
+    this.components = { providerDropdown, modelDropdown, advancedButton, configDisplay, configTextarea, responsesSlider, responsesInput, promptInput, copyButton, clearButton, submitButton, saveButton, responsesWrapper };
   }
   initializeController() {
-    const { modelDropdown, advancedButton, configDisplay, configTextarea, responsesSlider, responsesInput, promptInput, copyButton, submitButton, cancelButton, responsesWrapper } = this.components;
+    const { providerDropdown, modelDropdown, advancedButton, configDisplay, configTextarea, responsesSlider, responsesInput, promptInput, copyButton, clearButton, submitButton, saveButton, responsesWrapper } = this.components;
     let abortController = null;
-    const populate = async () => {
-      try {
-        const res = await this.service.fetchModels();
-        modelDropdown.innerHTML = "";
-        res.models.forEach((m) => {
-          modelDropdown.createEl("option", { value: m.name, text: m.name });
-        });
-        const initialModel = this.blockSettings.yamlConfig.model || this.service.getSettings().model;
-        if (initialModel) {
-          modelDropdown.value = initialModel;
+    let isGenerating = false;
+    const updateSubmitButtonState = () => {
+      const hasContent = promptInput.innerText.trim().length > 0;
+      if (isGenerating) {
+        submitButton.disabled = false;
+        submitButton.style.opacity = "1";
+        submitButton.style.backgroundColor = "var(--text-error)";
+        submitButton.style.color = "white";
+        obsidian.setIcon(submitButton, "square");
+        const icon = submitButton.querySelector("svg");
+        if (icon) {
+          icon.style.width = "14px";
+          icon.style.height = "14px";
         }
-      } catch (e) {
-        new obsidian.Notice("Failed to load models");
+        submitButton.title = "Stop generating";
+      } else {
+        submitButton.disabled = !hasContent;
+        submitButton.style.opacity = hasContent ? "1" : "0.4";
+        submitButton.style.backgroundColor = hasContent ? "var(--interactive-accent)" : "var(--background-modifier-border)";
+        submitButton.style.color = hasContent ? "var(--text-on-accent)" : "var(--text-muted)";
+        obsidian.setIcon(submitButton, "send");
+        const icon = submitButton.querySelector("svg");
+        if (icon) {
+          icon.style.width = "20px";
+          icon.style.height = "20px";
+        }
+        submitButton.title = hasContent ? "Generate (Enter)" : "Enter prompt to generate";
       }
     };
-    populate();
-    const updateModelInYaml = this.debounce((modelName) => {
-      this.blockSettings.yamlConfig.model = modelName;
+    updateSubmitButtonState();
+    const populateModels = async () => {
+      try {
+        const providerId = providerDropdown.value;
+        const provider = this.service.getProvider(providerId);
+        const res = await provider.fetchModels();
+        modelDropdown.innerHTML = "";
+        res.models.forEach((m) => {
+          modelDropdown.createEl("option", { value: m.id, text: m.name });
+        });
+        const savedModel = this.blockSettings.yamlConfig.model;
+        const defaultModel = providerId === "ollama" ? this.service.getSettings().ollama.model : this.service.getSettings().openai.model;
+        modelDropdown.value = savedModel || defaultModel;
+      } catch (e) {
+        new obsidian.Notice("Failed to load models for selected provider");
+      }
+    };
+    populateModels();
+    providerDropdown.addEventListener("change", async () => {
+      const providerId = providerDropdown.value;
+      this.blockSettings.yamlConfig.provider = providerId;
+      this.blockSettings.yamlConfig.model = "";
       const newYaml = this.manager.generateYamlFromConfig(this.blockSettings.yamlConfig);
       this.manager.updateFileBlock(this.el, this.ctx, promptInput.innerText.trim(), newYaml);
       if (configTextarea)
         configTextarea.value = newYaml;
-    }, 1e3);
+      await populateModels();
+    });
     modelDropdown.addEventListener("change", () => {
-      updateModelInYaml(modelDropdown.value);
+      this.blockSettings.yamlConfig.model = modelDropdown.value;
+      const newYaml = this.manager.generateYamlFromConfig(this.blockSettings.yamlConfig);
+      this.manager.updateFileBlock(this.el, this.ctx, promptInput.innerText.trim(), newYaml);
+      if (configTextarea)
+        configTextarea.value = newYaml;
     });
     if (copyButton) {
       copyButton.addEventListener("click", async () => {
@@ -283,6 +553,15 @@ class OllamaBlockView {
           await navigator.clipboard.writeText(text);
           new obsidian.Notice("Prompt copied to clipboard");
         }
+      });
+    }
+    if (clearButton) {
+      clearButton.addEventListener("click", () => {
+        promptInput.innerText = "";
+        updateSubmitButtonState();
+        const yaml = this.blockSettings.hasYaml ? configTextarea.value : "";
+        this.manager.updateFileBlock(this.el, this.ctx, "", yaml);
+        new obsidian.Notice("Prompt cleared");
       });
     }
     if (advancedButton) {
@@ -310,44 +589,156 @@ class OllamaBlockView {
       responsesSlider.value = responsesInput.value;
       updateResponseCount(parseInt(responsesInput.value));
     });
-    promptInput.addEventListener("input", this.debounce(() => {
-      const yaml = this.blockSettings.hasYaml ? configTextarea.value : "";
-      this.manager.updateFileBlock(this.el, this.ctx, promptInput.innerText.trim(), yaml);
-    }, 1e3));
-    submitButton.addEventListener("click", async () => {
+    const startGeneration = async () => {
+      if (isGenerating) {
+        abortController === null || abortController === void 0 ? void 0 : abortController.abort();
+        return;
+      }
       const prompt = promptInput.innerText.trim();
       if (!prompt)
-        return new obsidian.Notice("Prompt empty");
+        return;
+      isGenerating = true;
+      updateSubmitButtonState();
       const count = parseInt(responsesInput.value) || 1;
-      submitButton.disabled = true;
-      submitButton.textContent = "Generating...";
-      cancelButton.style.display = "block";
       responsesWrapper.style.display = "flex";
       responsesWrapper.innerHTML = "";
       abortController = new AbortController();
-      for (let i = 0; i < count; i++) {
-        const item = responsesWrapper.createDiv({ cls: "ollama-response-item" });
-        item.style.cssText = "background: var(--background-primary); border: 1px solid var(--background-modifier-border); border-radius: 4px; padding: 12px;";
-        const content = item.createDiv();
-        const outputPre = content.createEl("pre", { cls: "ollama-output" });
-        outputPre.style.cssText = "white-space: pre-wrap; font-size: var(--font-smaller);";
-        const currentModel = modelDropdown.value;
-        try {
-          await this.service.streamOllamaResponse(prompt, currentModel, this.blockSettings.yamlConfig, abortController, (chunk) => {
-            outputPre.textContent += chunk;
-          }, (final) => {
-          });
-        } catch (e) {
-          if (e.name === "AbortError")
+      const providerId = providerDropdown.value;
+      const provider = this.service.getProvider(providerId);
+      try {
+        for (let i = 0; i < count; i++) {
+          const item = responsesWrapper.createDiv({ cls: "ollama-response-item" });
+          item.style.cssText = "background: var(--background-primary); border: 1px solid var(--background-modifier-border); border-radius: 8px; padding: 12px; margin-bottom: 8px;";
+          const content = item.createDiv();
+          const outputPre = content.createEl("pre", { cls: "ollama-output" });
+          outputPre.style.cssText = "white-space: pre-wrap; font-size: var(--font-smaller); font-family: var(--font-monospace);";
+          try {
+            let statsShown = false;
+            const footerContainer = item.createDiv({ cls: "ollama-response-footer" });
+            footerContainer.style.cssText = "display: flex; justify-content: space-between; align-items: flex-end; margin-top: 8px; border-top: 1px solid var(--background-modifier-border); padding-top: 4px; position: relative;";
+            const copyRespButton = footerContainer.createEl("button", { cls: "ollama-response-copy-button" });
+            obsidian.setIcon(copyRespButton, "copy");
+            copyRespButton.style.cssText = "padding: 4px; border: none; border-radius: 4px; cursor: pointer; background: transparent; opacity: 0.3; transition: opacity 0.2s; display: flex; align-items: center; justify-content: center;";
+            copyRespButton.title = "Copy response";
+            copyRespButton.addEventListener("mouseenter", () => copyRespButton.style.opacity = "1");
+            copyRespButton.addEventListener("mouseleave", () => copyRespButton.style.opacity = "0.3");
+            copyRespButton.addEventListener("click", async () => {
+              await navigator.clipboard.writeText(outputPre.textContent || "");
+              new obsidian.Notice("Response copied");
+            });
+            const statsDiv = footerContainer.createDiv({ cls: "ollama-stats" });
+            statsDiv.style.cssText = "font-size: 10px; color: var(--text-muted);";
+            await provider.streamResponse(prompt, modelDropdown.value, this.blockSettings.yamlConfig, abortController, (chunk) => {
+              outputPre.textContent += chunk;
+            }, (final) => {
+              if (final.total_duration && !statsShown) {
+                statsShown = true;
+                const durationSec = (final.total_duration / 1e9).toFixed(2);
+                const totalTokens = (final.prompt_eval_count || 0) + (final.eval_count || 0);
+                statsDiv.textContent = `Tokens: ${totalTokens} | Time: ${durationSec}s`;
+              }
+            });
+          } catch (e) {
+            if (e.name === "AbortError")
+              break;
+            content.createDiv({ text: `Error: ${e.message}` }).style.color = "var(--text-error)";
             break;
-          content.createDiv({ text: `Error: ${e.message}` }).style.color = "var(--text-error)";
+          }
+        }
+      } finally {
+        isGenerating = false;
+        updateSubmitButtonState();
+      }
+    };
+    submitButton.addEventListener("click", startGeneration);
+    const manualSave = async () => {
+      const yaml = this.blockSettings.hasYaml ? configTextarea.value : "";
+      await this.manager.updateFileBlock(this.el, this.ctx, promptInput.innerText.trim(), yaml);
+      new obsidian.Notice("Saved");
+    };
+    saveButton.addEventListener("click", manualSave);
+    promptInput.addEventListener("input", () => {
+      updateSubmitButtonState();
+    });
+    promptInput.addEventListener("blur", () => {
+      const yaml = this.blockSettings.hasYaml ? configTextarea.value : "";
+      this.manager.updateFileBlock(this.el, this.ctx, promptInput.innerText.trim(), yaml);
+    });
+    promptInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        startGeneration();
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+        e.preventDefault();
+        manualSave();
+      }
+    });
+    const trackFocus = () => {
+      const section = this.ctx.getSectionInfo(this.el);
+      if (!section)
+        return;
+      const selection = window.getSelection();
+      if (!selection || selection.rangeCount === 0)
+        return;
+      const range = selection.getRangeAt(0);
+      const preRange = range.cloneRange();
+      preRange.selectNodeContents(promptInput);
+      preRange.setEnd(range.startContainer, range.startOffset);
+      const offset = preRange.toString().length;
+      this.manager.sessionFocus = {
+        lineStart: section.lineStart,
+        ch: offset,
+        file: this.ctx.sourcePath
+      };
+    };
+    promptInput.addEventListener("keyup", trackFocus);
+    promptInput.addEventListener("mouseup", trackFocus);
+    promptInput.addEventListener("focus", trackFocus);
+  }
+  restoreFocus() {
+    const { promptInput } = this.components;
+    const section = this.ctx.getSectionInfo(this.el);
+    const focus = this.manager.sessionFocus;
+    if (section && focus.lineStart === section.lineStart && focus.file === this.ctx.sourcePath) {
+      promptInput.focus();
+      if (focus.ch !== null) {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        let currentOffset = 0;
+        let targetNode = null;
+        let targetOffset = 0;
+        const findNode = (node) => {
+          if (node.nodeType === Node.TEXT_NODE) {
+            const len = node.length;
+            if (currentOffset + len >= focus.ch) {
+              targetNode = node;
+              targetOffset = focus.ch - currentOffset;
+              return true;
+            }
+            currentOffset += len;
+          } else {
+            for (let i = 0; i < node.childNodes.length; i++) {
+              if (findNode(node.childNodes[i]))
+                return true;
+            }
+          }
+          return false;
+        };
+        findNode(promptInput);
+        if (targetNode) {
+          range.setStart(targetNode, targetOffset);
+          range.collapse(true);
+          selection === null || selection === void 0 ? void 0 : selection.removeAllRanges();
+          selection === null || selection === void 0 ? void 0 : selection.addRange(range);
+        } else {
+          range.selectNodeContents(promptInput);
+          range.collapse(false);
+          selection === null || selection === void 0 ? void 0 : selection.removeAllRanges();
+          selection === null || selection === void 0 ? void 0 : selection.addRange(range);
         }
       }
-      submitButton.disabled = false;
-      submitButton.textContent = "Generate";
-      cancelButton.style.display = "none";
-    });
-    cancelButton.addEventListener("click", () => abortController === null || abortController === void 0 ? void 0 : abortController.abort());
+    }
   }
   debounce(fn, wait) {
     let t;
@@ -357,74 +748,103 @@ class OllamaBlockView {
     };
   }
 }
-class OllamaSettingTab extends obsidian.PluginSettingTab {
+class LLMSettingTab extends obsidian.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
   }
-  async display() {
+  display() {
     const { containerEl } = this;
     containerEl.empty();
-    new obsidian.Setting(containerEl).setName("Ollama Model").setDesc("Select model to use for generation").addDropdown(async (dropdown) => {
+    containerEl.createEl("h2", { text: "General Settings" });
+    new obsidian.Setting(containerEl).setName("Active Provider").setDesc("Select the AI provider to use by default").addDropdown((dropdown) => {
+      dropdown.addOption("ollama", "Ollama (Local)").addOption("openai", "OpenAI (Cloud)").setValue(this.plugin.settings.activeProvider).onChange(async (value) => {
+        this.plugin.settings.activeProvider = value;
+        await this.plugin.saveSettings();
+        this.display();
+      });
+    });
+    if (this.plugin.settings.activeProvider === "ollama") {
+      this.renderOllamaSettings(containerEl);
+    } else if (this.plugin.settings.activeProvider === "openai") {
+      this.renderOpenAISettings(containerEl);
+    }
+  }
+  renderOllamaSettings(containerEl) {
+    containerEl.createEl("h3", { text: "Ollama Settings" });
+    new obsidian.Setting(containerEl).setName("Ollama Server URL").setDesc("The URL where your Ollama server is running").addText((text) => text.setPlaceholder("http://localhost:11434").setValue(this.plugin.settings.ollama.serverUrl).onChange(async (value) => {
+      this.plugin.settings.ollama.serverUrl = value;
+      await this.plugin.saveSettings();
+    }));
+    new obsidian.Setting(containerEl).setName("Default Model").setDesc("Default model for newly created blocks").addDropdown(async (dropdown) => {
       dropdown.addOption("", "Loading models...");
       try {
-        const response = await this.plugin.ollamaService.fetchModels();
-        const selectEl = dropdown.selectEl;
-        while (selectEl.options.length > 0) {
-          selectEl.remove(0);
-        }
-        if (response.models.length === 0) {
-          dropdown.addOption("", "No models found");
-        } else {
-          response.models.forEach((model) => {
-            dropdown.addOption(model.name, `${model.name} (${model.details.parameter_size}, ${model.details.quantization_level})`);
-          });
-        }
-        dropdown.setValue(this.plugin.settings.model);
-      } catch (error) {
-        console.error(error);
-        dropdown.setValue(this.plugin.settings.model);
-        new obsidian.Notice("Failed to fetch models from Ollama server");
+        const provider = this.plugin.llmService.getProvider("ollama");
+        const response = await provider.fetchModels();
+        dropdown.selectEl.innerHTML = "";
+        response.models.forEach((m) => {
+          dropdown.addOption(m.id, m.name);
+        });
+        dropdown.setValue(this.plugin.settings.ollama.model);
+      } catch (e) {
+        dropdown.addOption("", "Could not load models");
       }
       dropdown.onChange(async (value) => {
-        if (!value)
-          return;
-        this.plugin.settings.model = value;
+        this.plugin.settings.ollama.model = value;
         await this.plugin.saveSettings();
       });
     });
-    new obsidian.Setting(containerEl).setName("Server URL").setDesc("The URL of your Ollama server").addText((text) => text.setPlaceholder("http://localhost:11434").setValue(this.plugin.settings.serverUrl).onChange(async (value) => {
-      this.plugin.settings.serverUrl = value;
-      this.plugin.ollamaService.clearCache();
+  }
+  renderOpenAISettings(containerEl) {
+    containerEl.createEl("h3", { text: "OpenAI Settings" });
+    new obsidian.Setting(containerEl).setName("API Key").setDesc("Your OpenAI API key").addText((text) => text.setPlaceholder("sk-...").setValue(this.plugin.settings.openai.apiKey).onChange(async (value) => {
+      this.plugin.settings.openai.apiKey = value;
+      await this.plugin.saveSettings();
+    }).inputEl.type = "password");
+    new obsidian.Setting(containerEl).setName("Base URL").setDesc("Custom endpoint (optional)").addText((text) => text.setPlaceholder("https://api.openai.com/v1").setValue(this.plugin.settings.openai.baseUrl).onChange(async (value) => {
+      this.plugin.settings.openai.baseUrl = value;
       await this.plugin.saveSettings();
     }));
+    new obsidian.Setting(containerEl).setName("Default Model").setDesc("Default model for OpenAI").addDropdown(async (dropdown) => {
+      const provider = this.plugin.llmService.getProvider("openai");
+      const response = await provider.fetchModels();
+      response.models.forEach((m) => {
+        dropdown.addOption(m.id, m.name);
+      });
+      dropdown.setValue(this.plugin.settings.openai.model);
+      dropdown.onChange(async (value) => {
+        this.plugin.settings.openai.model = value;
+        await this.plugin.saveSettings();
+      });
+    });
   }
 }
-class ObsidianOllamaTestPlugin extends obsidian.Plugin {
+class AITesterPlugin extends obsidian.Plugin {
   constructor() {
     super(...arguments);
     this.settings = DEFAULT_SETTINGS;
   }
   async onload() {
-    console.log("Obsidian Ollama Test plugin loading (Modular)...");
+    console.log("AI Tester plugin loading...");
     await this.loadSettings();
-    this.ollamaService = new OllamaServiceImpl(this.settings);
+    this.llmService = new LLMService(this.settings);
     this.blockManager = new BlockManager(this.app);
-    this.addSettingTab(new OllamaSettingTab(this.app, this));
+    this.addSettingTab(new LLMSettingTab(this.app, this));
     this.registerMarkdownCodeBlockProcessor("ollama", (source, el, ctx) => {
       const blockSettings = this.blockManager.parseBlock(source);
-      const view = new OllamaBlockView(el, this.ollamaService, this.blockManager, ctx, blockSettings);
+      const view = new OllamaBlockView(el, this.llmService, this.blockManager, ctx, blockSettings);
       view.render();
     });
   }
   async onunload() {
-    console.log("Obsidian Ollama Test plugin unloaded");
+    console.log("AI Tester plugin unloaded");
   }
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
   }
   async saveSettings() {
     await this.saveData(this.settings);
+    this.llmService.updateSettings(this.settings);
   }
 }
-module.exports = ObsidianOllamaTestPlugin;
+module.exports = AITesterPlugin;

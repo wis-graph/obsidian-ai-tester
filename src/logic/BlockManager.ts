@@ -1,18 +1,25 @@
 import { App, Notice, MarkdownView, MarkdownPostProcessorContext, parseYaml } from 'obsidian';
-import { OllamaBlockSettings, DEFAULT_BLOCK_CONFIG } from '../types';
+import { LLMBlockSettings, DEFAULT_BLOCK_CONFIG } from '../types';
 
 export class BlockManager {
     private app: App;
+    // Track focus state across re-renders
+    public sessionFocus: {
+        lineStart: number | null,
+        ch: number | null,
+        file: string | null
+    } = { lineStart: null, ch: null, file: null };
 
     constructor(app: App) {
         this.app = app;
     }
 
-    parseBlock(source: string): OllamaBlockSettings {
+    parseBlock(source: string): LLMBlockSettings {
         const trimmedSource = source.trim();
-        const yamlMatch = trimmedSource.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+        // More robust regex to match YAML even if the prompt is empty or just whitespace
+        const yamlMatch = trimmedSource.match(/^---\n([\s\S]*?)\n---(?:\n([\s\S]*)|$)/);
 
-        let config: OllamaBlockSettings = {
+        let config: LLMBlockSettings = {
             yamlConfig: { ...DEFAULT_BLOCK_CONFIG },
             prompt: trimmedSource,
             hasYaml: false
@@ -23,10 +30,11 @@ export class BlockManager {
             try {
                 const parsedYaml = parseYaml(yamlMatch[1]);
                 config.yamlConfig = { ...DEFAULT_BLOCK_CONFIG, ...parsedYaml };
-                config.prompt = yamlMatch[2].trim();
+                config.prompt = (yamlMatch[2] || '').trim();
             } catch (error) {
                 console.error('Error parsing YAML:', error);
-                new Notice('YAML parsing error, using default settings');
+                // If parsing fails, we treat the whole thing as prompt
+                config.hasYaml = false;
             }
         }
 
@@ -69,7 +77,7 @@ export class BlockManager {
         const endPos = { line: lineEnd, ch: 0 };
 
         editor.replaceRange(updatedBlockContent + '\n', startPos, endPos);
-        new Notice('Block synced to file');
+        // Notice removed as it interrupts typing flow
     }
 
     generateYamlFromConfig(config: any): string {

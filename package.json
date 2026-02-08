@@ -1,7 +1,7 @@
 {
-  "name": "obsidian-ollama-test",
+  "name": "ai-tester",
   "version": "1.0.0",
-  "description": "Ollama AI integration plugin for Obsidian",
+  "description": "AI testing integration for Obsidian",
   "main": "main.js",
   "scripts": {
     "dev": "vite",

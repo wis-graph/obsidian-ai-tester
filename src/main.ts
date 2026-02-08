@@ -1,34 +1,34 @@
 import { Plugin } from 'obsidian';
-import { OllamaSettings, DEFAULT_SETTINGS } from './types';
-import { OllamaServiceImpl, OllamaService } from './services/OllamaService';
+import { LLMSettings, DEFAULT_SETTINGS } from './types';
+import { LLMService } from './services/LLMService';
 import { BlockManager } from './logic/BlockManager';
 import { OllamaBlockView } from './ui/OllamaBlockView';
-import { OllamaSettingTab } from './settings/SettingsTab';
+import { LLMSettingTab } from './settings/SettingsTab';
 
-export default class ObsidianOllamaTestPlugin extends Plugin {
-	settings: OllamaSettings = DEFAULT_SETTINGS;
-	ollamaService: OllamaService;
+export default class AITesterPlugin extends Plugin {
+	settings: LLMSettings = DEFAULT_SETTINGS;
+	llmService: LLMService;
 	blockManager: BlockManager;
 
 	async onload() {
-		console.log('Obsidian Ollama Test plugin loading (Modular)...');
+		console.log('AI Tester plugin loading...');
 
 		await this.loadSettings();
 
-		this.ollamaService = new OllamaServiceImpl(this.settings);
+		this.llmService = new LLMService(this.settings);
 		this.blockManager = new BlockManager(this.app);
 
-		this.addSettingTab(new OllamaSettingTab(this.app, this));
+		this.addSettingTab(new LLMSettingTab(this.app, this));
 
 		this.registerMarkdownCodeBlockProcessor('ollama', (source, el, ctx) => {
 			const blockSettings = this.blockManager.parseBlock(source);
-			const view = new OllamaBlockView(el, this.ollamaService, this.blockManager, ctx, blockSettings);
+			const view = new OllamaBlockView(el, this.llmService, this.blockManager, ctx, blockSettings);
 			view.render();
 		});
 	}
 
 	async onunload() {
-		console.log('Obsidian Ollama Test plugin unloaded');
+		console.log('AI Tester plugin unloaded');
 	}
 
 	async loadSettings() {
@@ -37,5 +37,7 @@ export default class ObsidianOllamaTestPlugin extends Plugin {
 
 	async saveSettings() {
 		await this.saveData(this.settings);
+		this.llmService.updateSettings(this.settings);
 	}
 }
+

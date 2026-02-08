@@ -1,50 +1,55 @@
+export type ProviderType = 'ollama' | 'openai';
+
 export interface OllamaSettings {
-	model: string;
 	serverUrl: string;
+	model: string;
 }
 
-export const DEFAULT_SETTINGS: OllamaSettings = {
-	model: 'llama2',
-	serverUrl: 'http://localhost:11434'
+export interface OpenAISettings {
+	apiKey: string;
+	baseUrl: string;
+	model: string;
+}
+
+export interface LLMSettings {
+	activeProvider: ProviderType;
+	ollama: OllamaSettings;
+	openai: OpenAISettings;
+}
+
+export const DEFAULT_SETTINGS: LLMSettings = {
+	activeProvider: 'ollama',
+	ollama: {
+		serverUrl: 'http://localhost:11434',
+		model: 'llama3'
+	},
+	openai: {
+		apiKey: '',
+		baseUrl: 'https://api.openai.com/v1',
+		model: 'gpt-4o'
+	}
 };
 
-export interface OllamaModelDetails {
-	parent_model: string;
-	format: string;
-	family: string;
-	families: string[];
-	parameter_size: string;
-	quantization_level: string;
-}
-
-export interface OllamaModel {
+export interface LLMModel {
+	id: string;
 	name: string;
-	model: string;
-	modified_at: string;
-	size: number;
-	digest: string;
-	details: OllamaModelDetails;
 }
 
-export interface OllamaListResponse {
-	models: OllamaModel[];
+export interface LLMListResponse {
+	models: LLMModel[];
 }
 
-export interface OllamaGenerateResponse {
-	model: string;
-	created_at: string;
+export interface LLMGenerateResponse {
 	response: string;
 	done: boolean;
-	context: number[];
+	model: string;
 	total_duration?: number;
-	load_duration?: number;
 	prompt_eval_count?: number;
-	prompt_eval_duration?: number;
 	eval_count?: number;
-	eval_duration?: number;
 }
 
-export interface OllamaBlockConfig {
+export interface LLMBlockConfig {
+	provider?: ProviderType;
 	model?: string;
 	temperature?: number;
 	max_tokens?: number;
@@ -55,13 +60,14 @@ export interface OllamaBlockConfig {
 	num_responses?: number;
 }
 
-export interface OllamaBlockSettings {
-	yamlConfig: OllamaBlockConfig;
+export interface LLMBlockSettings {
+	yamlConfig: LLMBlockConfig;
 	prompt: string;
 	hasYaml: boolean;
 }
 
-export const DEFAULT_BLOCK_CONFIG: OllamaBlockConfig = {
+export const DEFAULT_BLOCK_CONFIG: LLMBlockConfig = {
+	provider: 'ollama',
 	model: '',
 	temperature: 0.7,
 	max_tokens: 4096,
@@ -71,3 +77,18 @@ export const DEFAULT_BLOCK_CONFIG: OllamaBlockConfig = {
 	presence_penalty: 0.0,
 	num_responses: 1
 };
+
+// Legacy Ollama types for internal use in OllamaProvider if needed
+export interface OllamaModel {
+	name: string;
+	model: string;
+	details: {
+		family: string;
+		parameter_size: string;
+	};
+}
+
+export interface OllamaListResponse {
+	models: OllamaModel[];
+}
+

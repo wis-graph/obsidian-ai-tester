@@ -40,9 +40,14 @@ curl -O https://raw.githubusercontent.com/wis-graph/obsidian-ai-tester/main/data
 <pre>
 ```ai-tester
 ---
-model: llama3
-temperature: 0.7
-num_responses: 2
+model: "gemma3n:e2b"
+temperature: 0.1
+max_tokens: 1024
+stop_sequences: []
+top_p: 0.95
+frequency_penalty: 0.5
+presence_penalty: 0.5
+num_responses: 20
 ---
 오늘 날씨에 대해 시 한 편 써줘.
 ```

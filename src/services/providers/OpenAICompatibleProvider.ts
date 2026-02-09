@@ -1,5 +1,6 @@
+import { Notice, requestUrl } from 'obsidian';
 import { LLMProvider } from './LLMProvider';
-import { LLMListResponse, LLMGenerateResponse, LLMBlockConfig, GenericLLMSettings } from '../../types';
+import { LLMListResponse, LLMGenerateResponse, LLMBlockConfig, GenericLLMSettings, LLMModel } from '../../types';
 
 export class OpenAICompatibleProvider implements LLMProvider {
     id: string;
@@ -18,47 +19,73 @@ export class OpenAICompatibleProvider implements LLMProvider {
 
     async fetchModels(): Promise<LLMListResponse> {
         if (!this.settings.apiKey) {
-            return { models: this.staticModels };
+            new Notice(`${this.name}: API Key가 없습니다. 기본 모델 목록만 표시합니다.`);
+            return { models: this.staticModels.map(m => ({ ...m, category: 'Recommended' })) };
         }
 
+        new Notice(`${this.name}: 모델 목록을 가져오는 중...`);
         try {
-            const response = await fetch(`${this.settings.baseUrl}/models`, {
+            const response = await requestUrl({
+                url: `${this.settings.baseUrl}/models`,
+                method: 'GET',
                 headers: {
-                    'Authorization': `Bearer ${this.settings.apiKey}`
+                    'Authorization': `Bearer ${this.settings.apiKey}`,
+                    'Content-Type': 'application/json'
                 }
             });
 
-            if (!response.ok) {
-                throw new Error(`Failed to fetch models: ${response.status}`);
+            if (response.status !== 200) {
+                let errorMsg = `API 오류 (${response.status})`;
+                if (response.status === 401) errorMsg = 'API Key가 올바르지 않습니다.';
+                if (response.status === 404) errorMsg = '모델 엔드포인트를 찾을 수 없습니다.';
+                throw new Error(errorMsg);
             }
 
-            const data = await response.json();
-            let apiModels = data.data || [];
+            const data = response.json;
+            const apiModels = data.data || data || [];
 
-            if (this.modelPrefixes.length > 0) {
-                apiModels = apiModels.filter((m: any) =>
-                    this.modelPrefixes.some((prefix: string) => m.id.toLowerCase().startsWith(prefix.toLowerCase()))
-                );
-            }
+            // Map all models from API
+            const mappedApiModels: LLMModel[] = (Array.isArray(apiModels) ? apiModels : []).map((m: any) => {
+                const modelId = m.id || m.name || (typeof m === 'string' ? m : '');
+                if (!modelId) return null;
 
-            const mappedApiModels = apiModels.map((m: any) => ({
-                id: m.id,
-                name: m.id
-            }));
+                const isRecommended = this.staticModels.some(sm => sm.id === modelId);
 
-            // Merge API models with static models, ensuring no duplicates
-            const allModels = [...this.staticModels];
-            mappedApiModels.forEach((apiModel: { id: string, name: string }) => {
-                if (!allModels.find(m => m.id === apiModel.id)) {
-                    allModels.push(apiModel);
+                return {
+                    id: modelId,
+                    name: modelId,
+                    category: isRecommended ? 'Recommended' : 'Others'
+                };
+            }).filter(m => m !== null) as LLMModel[];
+
+            // Merge logic
+            const allModelsMap = new Map<string, LLMModel>();
+
+            // 1. Add static models as Recommended
+            this.staticModels.forEach(m => {
+                allModelsMap.set(m.id, { ...m, category: 'Recommended' });
+            });
+
+            // 2. Add/Overwrite with API models
+            mappedApiModels.forEach(apiModel => {
+                if (!allModelsMap.has(apiModel.id)) {
+                    allModelsMap.set(apiModel.id, apiModel);
+                } else {
+                    // If already exists but API says it's Recommended, upgrade it
+                    if (apiModel.category === 'Recommended') {
+                        const existing = allModelsMap.get(apiModel.id);
+                        if (existing) existing.category = 'Recommended';
+                    }
                 }
             });
 
-            return { models: allModels };
+            const finalModels = Array.from(allModelsMap.values());
+            new Notice(`${this.name}: ${mappedApiModels.length}개의 모델을 동기화했습니다.`);
+            return { models: finalModels };
         } catch (error) {
             console.error(`Error fetching models from ${this.name}:`, error);
-            // Fallback to static models on error
-            return { models: this.staticModels };
+            new Notice(`${this.name} 오류: ${error.message}. 기본 목록을 사용합니다.`);
+            return { models: this.staticModels.map(m => ({ ...m, category: 'Recommended' })) };
         }
     }
 
@@ -71,84 +98,214 @@ export class OpenAICompatibleProvider implements LLMProvider {
         onDone: (finalData: LLMGenerateResponse) => void
     ): Promise<void> {
         const startTime = Date.now();
-        const requestBody = {
-            model: model || this.settings.model,
+
+        // CRITICAL FIX: Use the exact model entered/selected in the UI.
+        let targetModel = model || config.model || this.settings.model;
+
+        const requestBody: any = {
+            model: targetModel,
             messages: [{ role: 'user', content: prompt }],
             stream: true,
-            stream_options: { include_usage: true },
             temperature: config.temperature,
             max_tokens: config.max_tokens,
-            stop: config.stop_sequences,
-            top_p: config.top_p,
-            frequency_penalty: config.frequency_penalty,
-            presence_penalty: config.presence_penalty
+            top_p: config.top_p
         };
 
-        const response = await fetch(`${this.settings.baseUrl}/chat/completions`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${this.settings.apiKey}`
-            },
-            body: JSON.stringify(requestBody),
-            signal: abortController.signal
-        });
-
-        if (!response.ok) {
-            const err = await response.json();
-            throw new Error(`${this.name} API error: ${err.error?.message || response.statusText}`);
+        // Only include these optional parameters if they have been explicitly changed from the default (0/empty)
+        // This ensures that removing them from YAML actually removes them from the JSON payload.
+        if (config.stop_sequences && config.stop_sequences.length > 0) {
+            requestBody.stop = config.stop_sequences;
         }
 
-        const reader = response.body?.getReader();
-        if (!reader) throw new Error('Failed to read response body');
+        if (config.frequency_penalty !== undefined && config.frequency_penalty !== 0) {
+            requestBody.frequency_penalty = config.frequency_penalty;
+        }
 
-        const decoder = new TextDecoder();
-        let buffer = '';
+        if (config.presence_penalty !== undefined && config.presence_penalty !== 0) {
+            requestBody.presence_penalty = config.presence_penalty;
+        }
 
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
+        // Transparency & Warning for Gemini
+        if (this.id === 'gemini') {
+            const unsupported = [];
+            if (requestBody.frequency_penalty !== undefined) unsupported.push('frequency_penalty');
+            if (requestBody.presence_penalty !== undefined) unsupported.push('presence_penalty');
 
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop() || '';
+            if (unsupported.length > 0) {
+                new Notice(`⚠️ Gemini Warning: ${unsupported.join(', ')} 속성은 Gemini에서 지원되지 않아 400 에러가 발생할 수 있습니다.`, 5000);
+            }
+        }
 
-            for (const line of lines) {
-                const trimmedLine = line.trim();
-                if (!trimmedLine || trimmedLine === 'data: [DONE]') continue;
+        try {
+            const baseUrl = this.settings.baseUrl.replace(/\/+$/, '');
+            const url = `${baseUrl}/chat/completions`;
 
-                if (trimmedLine.startsWith('data: ')) {
-                    try {
-                        const data = JSON.parse(trimmedLine.slice(6));
+            const headers: any = {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${this.settings.apiKey}`
+            };
 
-                        if (data.usage) {
-                            onDone({
-                                response: '',
-                                done: true,
-                                model: model,
-                                prompt_eval_count: data.usage.prompt_tokens,
-                                eval_count: data.usage.completion_tokens,
-                                total_duration: (Date.now() - startTime) * 1e6
-                            });
-                            continue;
+            // Chinese providers or others might prefer an additional api-key header
+            if (this.id === 'glm' || this.id === 'kimi') {
+                headers['api-key'] = this.settings.apiKey;
+            }
+
+            console.log(`[${this.name}] FINAL REQUEST: ${targetModel} at ${url}`);
+            console.log(`[${this.name}] Sending Body:`, JSON.stringify(requestBody));
+
+            let response: Response;
+            try {
+                response = await fetch(url, {
+                    method: 'POST',
+                    headers: headers,
+                    body: JSON.stringify(requestBody),
+                    signal: abortController.signal
+                });
+            } catch (fetchError) {
+                // If fetch fails (CORS, network), fallback to non-streaming requestUrl
+                console.warn(`[${this.name}] Streaming fetch failed. Falling back to non-streaming requestUrl.`, fetchError);
+                await this.fallbackNonStreaming(prompt, model, config, onChunk, onDone);
+                return;
+            }
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}));
+                console.error(`[${this.name}] Server Error Payload:`, errorData);
+
+                // Extract the most descriptive error message possible
+                const message = errorData.error?.message ||
+                    (typeof errorData === 'object' ? JSON.stringify(errorData) : null) ||
+                    response.statusText ||
+                    `HTTP ${response.status}`;
+                throw new Error(message);
+            }
+
+            const reader = response.body?.getReader();
+            if (!reader) {
+                console.warn(`[${this.name}] ReadableStream not supported. Falling back to non-streaming.`);
+                await this.fallbackNonStreaming(prompt, model, config, onChunk, onDone);
+                return;
+            }
+
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+
+                for (const line of lines) {
+                    const trimmedLine = line.trim();
+                    if (!trimmedLine) continue;
+
+                    if (trimmedLine.startsWith('data:')) {
+                        const jsonStr = trimmedLine.replace(/^data:\s*/, '');
+                        if (jsonStr === '[DONE]') continue;
+
+                        try {
+                            const data = JSON.parse(jsonStr);
+                            const content = data.choices?.[0]?.delta?.content;
+                            if (content) onChunk(content);
+
+                            if (data.choices?.[0]?.finish_reason) {
+                                onDone({
+                                    response: '',
+                                    done: true,
+                                    model: data.model || model,
+                                    total_duration: (Date.now() - startTime) * 1e6
+                                });
+                            }
+                        } catch (e) {
+                            console.warn(`[${this.name}] Skip chunk:`, trimmedLine);
                         }
-
-                        const content = data.choices[0]?.delta?.content;
-                        if (content) onChunk(content);
-
-                        if (data.choices[0]?.finish_reason && !data.usage) {
-                            onDone({
-                                response: '',
-                                done: true,
-                                model: data.model || model,
-                                total_duration: (Date.now() - startTime) * 1e6
-                            });
-                        }
-                    } catch (e) {
-                        console.error(`Error parsing ${this.name} stream chunk:`, trimmedLine, e);
                     }
                 }
             }
+        } catch (error) {
+            const errorMsg = error.message || 'Unknown stream error';
+            if (error.name === 'AbortError') {
+                console.log(`[${this.name}] Request aborted`);
+            } else {
+                console.error(`[${this.name}] Generation failed:`, error);
+                new Notice(`${this.name} 생성 실패: ${errorMsg}`);
+                throw error;
+            }
+        }
+    }
+
+    private async fallbackNonStreaming(
+        prompt: string,
+        model: string,
+        config: LLMBlockConfig,
+        onChunk: (chunk: string) => void,
+        onDone: (finalData: LLMGenerateResponse) => void
+    ): Promise<void> {
+        const startTime = Date.now();
+
+        let targetModel = model || this.settings.model;
+        if (this.id === 'gemini') {
+            targetModel = targetModel.replace(/^models\//, '');
+        }
+
+        const requestBody: any = {
+            model: targetModel,
+            messages: [{ role: 'user', content: prompt }],
+            stream: false,
+        };
+
+        if (config.temperature !== undefined && config.temperature !== 0.7) requestBody.temperature = config.temperature;
+        if (config.max_tokens !== undefined && config.max_tokens > 0) requestBody.max_tokens = config.max_tokens;
+        if (config.top_p !== undefined && config.top_p !== 1.0 && config.top_p !== 0) requestBody.top_p = config.top_p;
+        if (config.stop_sequences && config.stop_sequences.length > 0) requestBody.stop = config.stop_sequences;
+        if (config.frequency_penalty !== undefined && config.frequency_penalty !== 0) requestBody.frequency_penalty = config.frequency_penalty;
+        if (config.presence_penalty !== undefined && config.presence_penalty !== 0) requestBody.presence_penalty = config.presence_penalty;
+
+        const headers: any = {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${this.settings.apiKey}`
+        };
+
+        const baseUrl = this.settings.baseUrl.replace(/\/+$/, '');
+        const url = `${baseUrl}/chat/completions`;
+
+        if (this.id === 'glm' || this.id === 'kimi') {
+            headers['api-key'] = this.settings.apiKey;
+        }
+
+        console.log(`[${this.name}] Fallback Requesting: ${targetModel} at ${url}`);
+        console.log(`[${this.name}] Fallback Body:`, JSON.stringify(requestBody));
+
+        try {
+            const response = await requestUrl({
+                url: url,
+                method: 'POST',
+                headers: headers,
+                body: JSON.stringify(requestBody)
+            });
+
+            if (response.status !== 200) {
+                throw new Error(`Fallback failed: HTTP ${response.status}`);
+            }
+
+            const data = response.json;
+            const content = data.choices?.[0]?.message?.content || '';
+            if (content) onChunk(content);
+
+            onDone({
+                response: content,
+                done: true,
+                model: data.model || model,
+                prompt_eval_count: data.usage?.prompt_tokens,
+                eval_count: data.usage?.completion_tokens,
+                total_duration: (Date.now() - startTime) * 1e6
+            });
+        } catch (e) {
+            console.error(`[${this.name}] Fallback failed:`, e);
+            throw e;
         }
     }
 }

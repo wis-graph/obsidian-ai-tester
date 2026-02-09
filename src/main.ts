@@ -9,6 +9,7 @@ export default class AITesterPlugin extends Plugin {
 	settings: LLMSettings = DEFAULT_SETTINGS;
 	llmService: LLMService;
 	blockManager: BlockManager;
+	envKeys: Set<string> = new Set();
 
 	async onload() {
 		console.log('AI Tester plugin loading...');
@@ -33,7 +34,60 @@ export default class AITesterPlugin extends Plugin {
 
 	async loadSettings() {
 		const loadedData = await this.loadData();
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, loadedData);
+		this.settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
+
+		if (loadedData) {
+			Object.assign(this.settings, loadedData);
+			const providers: (keyof LLMSettings)[] = ['ollama', 'openai', 'gemini', 'grok', 'glm', 'kimi'];
+			providers.forEach(p => {
+				if (loadedData[p]) {
+					this.settings[p] = Object.assign({}, (DEFAULT_SETTINGS as any)[p], loadedData[p]);
+				}
+			});
+		}
+
+		this.envKeys.clear();
+
+		// Support for .env file to hide API keys from data.json
+		try {
+			const envPath = `${this.manifest.dir}/.env`;
+			if (await this.app.vault.adapter.exists(envPath)) {
+				const envContent = await this.app.vault.adapter.read(envPath);
+				const envLines = envContent.split('\n');
+
+				envLines.forEach(line => {
+					const [key, value] = line.split('=').map(s => s.trim());
+					if (!key || !value) return;
+
+					// Map environment variables to settings
+					switch (key.toUpperCase()) {
+						case 'OPENAI_API_KEY':
+							this.settings.openai.apiKey = value;
+							this.envKeys.add('openai');
+							break;
+						case 'GEMINI_API_KEY':
+							this.settings.gemini.apiKey = value;
+							this.envKeys.add('gemini');
+							break;
+						case 'GROK_API_KEY':
+							this.settings.grok.apiKey = value;
+							this.envKeys.add('grok');
+							break;
+						case 'GLM_API_KEY':
+							this.settings.glm.apiKey = value;
+							this.envKeys.add('glm');
+							break;
+						case 'KIMI_API_KEY':
+							this.settings.kimi.apiKey = value;
+							this.envKeys.add('kimi');
+							break;
+					}
+				});
+				console.log('API Keys loaded from .env file successfully.');
+			}
+		} catch (e) {
+			console.error('Failed to load .env file:', e);
+		}
 
 		// Migration: Move top-level model/serverUrl if they exist
 		if (loadedData && (loadedData.model || loadedData.serverUrl)) {
@@ -50,12 +104,15 @@ export default class AITesterPlugin extends Plugin {
 	}
 
 	async saveSettings() {
-		// Only save keys that are in DEFAULT_SETTINGS
-		const sanitizedSettings: any = {};
-		const validKeys = Object.keys(DEFAULT_SETTINGS) as (keyof LLMSettings)[];
+		// Deep copy to avoid modifying runtime settings
+		const sanitizedSettings: any = JSON.parse(JSON.stringify(this.settings));
 
-		validKeys.forEach(key => {
-			sanitizedSettings[key] = this.settings[key];
+		// ABSOLUTE SECURITY: Completely remove all apiKey fields from the object before saving to data.json
+		const targetProviders: (keyof LLMSettings)[] = ['openai', 'gemini', 'grok', 'glm', 'kimi'];
+		targetProviders.forEach(p => {
+			if (sanitizedSettings[p]) {
+				delete sanitizedSettings[p].apiKey;
+			}
 		});
 
 		await this.saveData(sanitizedSettings);

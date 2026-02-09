@@ -9,22 +9,22 @@ const DEFAULT_SETTINGS = {
   openai: {
     apiKey: "",
     baseUrl: "https://api.openai.com/v1",
-    model: "gpt-5.2"
+    model: "gpt-4o"
   },
   gemini: {
     apiKey: "",
     baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
-    model: "gemini-3-pro"
+    model: "gemini-1.5-flash"
   },
   grok: {
     apiKey: "",
     baseUrl: "https://api.x.ai/v1",
-    model: "grok-4.1"
+    model: "grok-beta"
   },
   glm: {
     apiKey: "",
     baseUrl: "https://open.bigmodel.cn/api/paas/v4",
-    model: "glm-4.7"
+    model: "glm-4-flash"
   },
   kimi: {
     apiKey: "",
@@ -130,139 +130,292 @@ class OllamaProvider {
   }
 }
 class OpenAICompatibleProvider {
-  constructor(id, name, settings, modelPrefixes = []) {
+  constructor(id, name, settings, modelPrefixes = [], staticModels = []) {
     this.id = id;
     this.name = name;
     this.settings = settings;
     this.modelPrefixes = modelPrefixes;
+    this.staticModels = staticModels;
   }
   async fetchModels() {
     if (!this.settings.apiKey) {
-      return { models: [{ id: this.settings.model, name: this.settings.model }] };
+      new obsidian.Notice(`${this.name}: API Key가 없습니다. 기본 모델 목록만 표시합니다.`);
+      return { models: this.staticModels.map((m) => ({ ...m, category: "Recommended" })) };
     }
+    new obsidian.Notice(`${this.name}: 모델 목록을 가져오는 중...`);
     try {
-      const response = await fetch(`${this.settings.baseUrl}/models`, {
+      const response = await obsidian.requestUrl({
+        url: `${this.settings.baseUrl}/models`,
+        method: "GET",
         headers: {
-          "Authorization": `Bearer ${this.settings.apiKey}`
+          "Authorization": `Bearer ${this.settings.apiKey}`,
+          "Content-Type": "application/json"
         }
       });
-      if (!response.ok) {
-        throw new Error(`Failed to fetch models: ${response.status}`);
+      if (response.status !== 200) {
+        let errorMsg = `API 오류 (${response.status})`;
+        if (response.status === 401) errorMsg = "API Key가 올바르지 않습니다.";
+        if (response.status === 404) errorMsg = "모델 엔드포인트를 찾을 수 없습니다.";
+        throw new Error(errorMsg);
       }
-      const data = await response.json();
-      let models = data.data || [];
-      if (this.modelPrefixes.length > 0) {
-        models = models.filter(
-          (m) => this.modelPrefixes.some((prefix) => m.id.toLowerCase().startsWith(prefix.toLowerCase()))
-        );
-      }
-      return {
-        models: models.map((m) => ({
-          id: m.id,
-          name: m.id
-        }))
-      };
+      const data = response.json;
+      const apiModels = data.data || data || [];
+      const mappedApiModels = (Array.isArray(apiModels) ? apiModels : []).map((m) => {
+        const modelId = m.id || m.name || (typeof m === "string" ? m : "");
+        if (!modelId) return null;
+        const isRecommended = this.staticModels.some((sm) => sm.id === modelId);
+        return {
+          id: modelId,
+          name: modelId,
+          category: isRecommended ? "Recommended" : "Others"
+        };
+      }).filter((m) => m !== null);
+      const allModelsMap = /* @__PURE__ */ new Map();
+      this.staticModels.forEach((m) => {
+        allModelsMap.set(m.id, { ...m, category: "Recommended" });
+      });
+      mappedApiModels.forEach((apiModel) => {
+        if (!allModelsMap.has(apiModel.id)) {
+          allModelsMap.set(apiModel.id, apiModel);
+        } else {
+          if (apiModel.category === "Recommended") {
+            const existing = allModelsMap.get(apiModel.id);
+            if (existing) existing.category = "Recommended";
+          }
+        }
+      });
+      const finalModels = Array.from(allModelsMap.values());
+      new obsidian.Notice(`${this.name}: ${mappedApiModels.length}개의 모델을 동기화했습니다.`);
+      return { models: finalModels };
     } catch (error) {
       console.error(`Error fetching models from ${this.name}:`, error);
-      return { models: [{ id: this.settings.model, name: this.settings.model }] };
+      new obsidian.Notice(`${this.name} 오류: ${error.message}. 기본 목록을 사용합니다.`);
+      return { models: this.staticModels.map((m) => ({ ...m, category: "Recommended" })) };
     }
   }
   async streamResponse(prompt, model, config, abortController, onChunk, onDone) {
-    var _a, _b, _c, _d, _e;
+    var _a, _b, _c, _d, _e, _f, _g;
     const startTime = Date.now();
+    let targetModel = model || config.model || this.settings.model;
     const requestBody = {
-      model: model || this.settings.model,
+      model: targetModel,
       messages: [{ role: "user", content: prompt }],
       stream: true,
-      stream_options: { include_usage: true },
       temperature: config.temperature,
       max_tokens: config.max_tokens,
-      stop: config.stop_sequences,
-      top_p: config.top_p,
-      frequency_penalty: config.frequency_penalty,
-      presence_penalty: config.presence_penalty
+      top_p: config.top_p
     };
-    const response = await fetch(`${this.settings.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
+    if (config.stop_sequences && config.stop_sequences.length > 0) {
+      requestBody.stop = config.stop_sequences;
+    }
+    if (config.frequency_penalty !== void 0 && config.frequency_penalty !== 0) {
+      requestBody.frequency_penalty = config.frequency_penalty;
+    }
+    if (config.presence_penalty !== void 0 && config.presence_penalty !== 0) {
+      requestBody.presence_penalty = config.presence_penalty;
+    }
+    if (this.id === "gemini") {
+      const unsupported = [];
+      if (requestBody.frequency_penalty !== void 0) unsupported.push("frequency_penalty");
+      if (requestBody.presence_penalty !== void 0) unsupported.push("presence_penalty");
+      if (unsupported.length > 0) {
+        new obsidian.Notice(`⚠️ Gemini Warning: ${unsupported.join(", ")} 속성은 Gemini에서 지원되지 않아 400 에러가 발생할 수 있습니다.`, 5e3);
+      }
+    }
+    try {
+      const baseUrl = this.settings.baseUrl.replace(/\/+$/, "");
+      const url = `${baseUrl}/chat/completions`;
+      const headers = {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${this.settings.apiKey}`
-      },
-      body: JSON.stringify(requestBody),
-      signal: abortController.signal
-    });
-    if (!response.ok) {
-      const err = await response.json();
-      throw new Error(`${this.name} API error: ${((_a = err.error) == null ? void 0 : _a.message) || response.statusText}`);
-    }
-    const reader = (_b = response.body) == null ? void 0 : _b.getReader();
-    if (!reader) throw new Error("Failed to read response body");
-    const decoder = new TextDecoder();
-    let buffer = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-      for (const line of lines) {
-        const trimmedLine = line.trim();
-        if (!trimmedLine || trimmedLine === "data: [DONE]") continue;
-        if (trimmedLine.startsWith("data: ")) {
-          try {
-            const data = JSON.parse(trimmedLine.slice(6));
-            if (data.usage) {
-              onDone({
-                response: "",
-                done: true,
-                model,
-                prompt_eval_count: data.usage.prompt_tokens,
-                eval_count: data.usage.completion_tokens,
-                total_duration: (Date.now() - startTime) * 1e6
-              });
-              continue;
+      };
+      if (this.id === "glm" || this.id === "kimi") {
+        headers["api-key"] = this.settings.apiKey;
+      }
+      console.log(`[${this.name}] FINAL REQUEST: ${targetModel} at ${url}`);
+      console.log(`[${this.name}] Sending Body:`, JSON.stringify(requestBody));
+      let response;
+      try {
+        response = await fetch(url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(requestBody),
+          signal: abortController.signal
+        });
+      } catch (fetchError) {
+        console.warn(`[${this.name}] Streaming fetch failed. Falling back to non-streaming requestUrl.`, fetchError);
+        await this.fallbackNonStreaming(prompt, model, config, onChunk, onDone);
+        return;
+      }
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        console.error(`[${this.name}] Server Error Payload:`, errorData);
+        const message = ((_a = errorData.error) == null ? void 0 : _a.message) || (typeof errorData === "object" ? JSON.stringify(errorData) : null) || response.statusText || `HTTP ${response.status}`;
+        throw new Error(message);
+      }
+      const reader = (_b = response.body) == null ? void 0 : _b.getReader();
+      if (!reader) {
+        console.warn(`[${this.name}] ReadableStream not supported. Falling back to non-streaming.`);
+        await this.fallbackNonStreaming(prompt, model, config, onChunk, onDone);
+        return;
+      }
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          const trimmedLine = line.trim();
+          if (!trimmedLine) continue;
+          if (trimmedLine.startsWith("data:")) {
+            const jsonStr = trimmedLine.replace(/^data:\s*/, "");
+            if (jsonStr === "[DONE]") continue;
+            try {
+              const data = JSON.parse(jsonStr);
+              const content = (_e = (_d = (_c = data.choices) == null ? void 0 : _c[0]) == null ? void 0 : _d.delta) == null ? void 0 : _e.content;
+              if (content) onChunk(content);
+              if ((_g = (_f = data.choices) == null ? void 0 : _f[0]) == null ? void 0 : _g.finish_reason) {
+                onDone({
+                  response: "",
+                  done: true,
+                  model: data.model || model,
+                  total_duration: (Date.now() - startTime) * 1e6
+                });
+              }
+            } catch (e) {
+              console.warn(`[${this.name}] Skip chunk:`, trimmedLine);
             }
-            const content = (_d = (_c = data.choices[0]) == null ? void 0 : _c.delta) == null ? void 0 : _d.content;
-            if (content) onChunk(content);
-            if (((_e = data.choices[0]) == null ? void 0 : _e.finish_reason) && !data.usage) {
-              onDone({
-                response: "",
-                done: true,
-                model: data.model || model,
-                total_duration: (Date.now() - startTime) * 1e6
-              });
-            }
-          } catch (e) {
-            console.error(`Error parsing ${this.name} stream chunk:`, trimmedLine, e);
           }
         }
       }
+    } catch (error) {
+      const errorMsg = error.message || "Unknown stream error";
+      if (error.name === "AbortError") {
+        console.log(`[${this.name}] Request aborted`);
+      } else {
+        console.error(`[${this.name}] Generation failed:`, error);
+        new obsidian.Notice(`${this.name} 생성 실패: ${errorMsg}`);
+        throw error;
+      }
+    }
+  }
+  async fallbackNonStreaming(prompt, model, config, onChunk, onDone) {
+    var _a, _b, _c, _d, _e;
+    const startTime = Date.now();
+    let targetModel = model || this.settings.model;
+    if (this.id === "gemini") {
+      targetModel = targetModel.replace(/^models\//, "");
+    }
+    const requestBody = {
+      model: targetModel,
+      messages: [{ role: "user", content: prompt }],
+      stream: false
+    };
+    if (config.temperature !== void 0 && config.temperature !== 0.7) requestBody.temperature = config.temperature;
+    if (config.max_tokens !== void 0 && config.max_tokens > 0) requestBody.max_tokens = config.max_tokens;
+    if (config.top_p !== void 0 && config.top_p !== 1 && config.top_p !== 0) requestBody.top_p = config.top_p;
+    if (config.stop_sequences && config.stop_sequences.length > 0) requestBody.stop = config.stop_sequences;
+    if (config.frequency_penalty !== void 0 && config.frequency_penalty !== 0) requestBody.frequency_penalty = config.frequency_penalty;
+    if (config.presence_penalty !== void 0 && config.presence_penalty !== 0) requestBody.presence_penalty = config.presence_penalty;
+    const headers = {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${this.settings.apiKey}`
+    };
+    const baseUrl = this.settings.baseUrl.replace(/\/+$/, "");
+    const url = `${baseUrl}/chat/completions`;
+    if (this.id === "glm" || this.id === "kimi") {
+      headers["api-key"] = this.settings.apiKey;
+    }
+    console.log(`[${this.name}] Fallback Requesting: ${targetModel} at ${url}`);
+    console.log(`[${this.name}] Fallback Body:`, JSON.stringify(requestBody));
+    try {
+      const response = await obsidian.requestUrl({
+        url,
+        method: "POST",
+        headers,
+        body: JSON.stringify(requestBody)
+      });
+      if (response.status !== 200) {
+        throw new Error(`Fallback failed: HTTP ${response.status}`);
+      }
+      const data = response.json;
+      const content = ((_c = (_b = (_a = data.choices) == null ? void 0 : _a[0]) == null ? void 0 : _b.message) == null ? void 0 : _c.content) || "";
+      if (content) onChunk(content);
+      onDone({
+        response: content,
+        done: true,
+        model: data.model || model,
+        prompt_eval_count: (_d = data.usage) == null ? void 0 : _d.prompt_tokens,
+        eval_count: (_e = data.usage) == null ? void 0 : _e.completion_tokens,
+        total_duration: (Date.now() - startTime) * 1e6
+      });
+    } catch (e) {
+      console.error(`[${this.name}] Fallback failed:`, e);
+      throw e;
     }
   }
 }
 class OpenAIProvider extends OpenAICompatibleProvider {
   constructor(settings) {
-    super("openai", "OpenAI", settings, ["gpt-", "o1-", "o3-", "o4-", "o5-"]);
+    const staticModels = [
+      { id: "o1", name: "o1 (Reasoning)" },
+      { id: "o1-mini", name: "o1-mini (Fast Reasoning)" },
+      { id: "gpt-4o", name: "GPT-4o (Flagship)" },
+      { id: "gpt-4o-mini", name: "GPT-4o Mini" },
+      { id: "gpt-4-turbo", name: "GPT-4 Turbo" }
+    ];
+    super("openai", "OpenAI", settings, ["gpt-", "o1-"], staticModels);
   }
 }
 class GeminiProvider extends OpenAICompatibleProvider {
   constructor(settings) {
-    super("gemini", "Gemini", settings, ["gemini-"]);
+    const staticModels = [
+      { id: "gemini-3-flash-preview", name: "Gemini 3 Flash Preview" },
+      { id: "gemini-3-pro", name: "Gemini 3 Pro" },
+      { id: "gemini-1.5-flash", name: "Gemini 1.5 Flash" },
+      { id: "gemini-1.5-pro", name: "Gemini 1.5 Pro" },
+      { id: "gemma-3-27b-it", name: "Gemma 3 27B IT" },
+      { id: "gemma-3-12b-it", name: "Gemma 3 12B IT" },
+      { id: "gemma-3-4b-it", name: "Gemma 3 4B IT" }
+    ];
+    super("gemini", "Gemini", settings, ["gemini-", "gemma-"], staticModels);
   }
 }
 class GrokProvider extends OpenAICompatibleProvider {
   constructor(settings) {
-    super("grok", "Grok", settings, ["grok-"]);
+    const staticModels = [
+      { id: "grok-2-1212", name: "Grok-2" },
+      { id: "grok-2-mini", name: "Grok-2 Mini" },
+      { id: "grok-beta", name: "Grok Beta" }
+    ];
+    super("grok", "Grok", settings, ["grok-"], staticModels);
   }
 }
 class GLMProvider extends OpenAICompatibleProvider {
   constructor(settings) {
-    super("glm", "GLM", settings, ["glm-"]);
+    const staticModels = [
+      { id: "glm-4-plus", name: "GLM-4 Plus" },
+      { id: "glm-4-0520", name: "GLM-4 (0520)" },
+      { id: "glm-4-air", name: "GLM-4 Air" },
+      { id: "glm-4-flash", name: "GLM-4 Flash" }
+    ];
+    super("glm", "GLM", settings, ["glm-"], staticModels);
   }
 }
 class KimiProvider extends OpenAICompatibleProvider {
   constructor(settings) {
-    super("kimi", "Kimi", settings, ["moonshot-"]);
+    const staticModels = [
+      { id: "kimi-k2.5", name: "Kimi K2.5 (Multimodal Agent)" },
+      { id: "kimi-k2-thinking", name: "Kimi K2 Thinking" },
+      { id: "kimi-k2-turbo-preview", name: "Kimi K2 Turbo" },
+      { id: "moonshot-v1-128k", name: "Moonshot V1 128k" },
+      { id: "moonshot-v1-32k", name: "Moonshot V1 32k" },
+      { id: "moonshot-v1-8k", name: "Moonshot V1 8k" }
+    ];
+    super("kimi", "Kimi", settings, ["moonshot-", "kimi-"], staticModels);
   }
 }
 class LLMService {
@@ -431,9 +584,18 @@ class OllamaBlockView {
     }
     const promptContainer = container.createDiv({ cls: "ollama-prompt-container" });
     promptContainer.style.cssText = "position: relative; width: 100%; margin-bottom: 12px;";
-    const promptInput = promptContainer.createEl("div", { cls: "ollama-prompt-input", attr: { contenteditable: "true", "data-placeholder": "Enter prompt..." } });
-    promptInput.innerHTML = this.blockSettings.prompt;
-    promptInput.style.cssText = "width: 100%; padding: 12px; padding-bottom: 45px; border: 1px solid var(--background-modifier-border); border-radius: 8px; background: var(--background-primary); color: var(--text-normal); overflow: auto; min-height: 100px; white-space: pre-wrap; word-wrap: break-word; outline: none; transition: border-color 0.2s;";
+    const promptInput = promptContainer.createEl("textarea", { cls: "ollama-prompt-input", attr: { placeholder: "Enter prompt..." } });
+    promptInput.value = this.blockSettings.prompt;
+    promptInput.style.cssText = "width: 100%; padding: 12px; padding-bottom: 45px; border: 1px solid var(--background-modifier-border); border-radius: 8px; background: var(--background-primary); color: var(--text-normal); overflow: hidden; min-height: 100px; white-space: pre-wrap; word-wrap: break-word; outline: none; transition: border-color 0.2s; resize: none; display: block; height: auto;";
+    const adjustHeight = () => {
+      promptInput.style.height = "auto";
+      const newHeight = Math.max(100, promptInput.scrollHeight);
+      promptInput.style.height = newHeight + "px";
+    };
+    promptInput.addEventListener("input", () => {
+      adjustHeight();
+    });
+    setTimeout(adjustHeight, 0);
     promptInput.addEventListener("focus", () => promptInput.style.borderColor = "var(--interactive-accent)");
     promptInput.addEventListener("blur", () => promptInput.style.borderColor = "var(--background-modifier-border)");
     const actionButtons = promptContainer.createDiv({ cls: "ollama-action-buttons" });
@@ -527,7 +689,7 @@ class OllamaBlockView {
     let abortController = null;
     let isGenerating = false;
     const updateSubmitButtonState = () => {
-      const hasContent = promptInput.innerText.trim().length > 0;
+      const hasContent = promptInput.value.trim().length > 0;
       if (isGenerating) {
         submitButton.disabled = false;
         submitButton.style.opacity = "1";
@@ -565,7 +727,13 @@ class OllamaBlockView {
           modelDropdown.createEl("option", { value: m.id, text: m.name });
         });
         const savedModel = this.blockSettings.yamlConfig.model;
-        const defaultModel = providerId === "ollama" ? this.service.getSettings().ollama.model : this.service.getSettings().openai.model;
+        const settings = this.service.getSettings();
+        let defaultModel = "";
+        if (providerId === "ollama") {
+          defaultModel = settings.ollama.model;
+        } else if (providerId in settings) {
+          defaultModel = settings[providerId].model;
+        }
         modelDropdown.value = savedModel || defaultModel;
       } catch (e) {
         new obsidian.Notice("Failed to load models for selected provider");
@@ -577,19 +745,19 @@ class OllamaBlockView {
       this.blockSettings.yamlConfig.provider = providerId;
       this.blockSettings.yamlConfig.model = "";
       const newYaml = this.manager.generateYamlFromConfig(this.blockSettings.yamlConfig);
-      this.manager.updateFileBlock(this.el, this.ctx, promptInput.innerText.trim(), newYaml);
+      this.manager.updateFileBlock(this.el, this.ctx, promptInput.value.trim(), newYaml);
       if (configTextarea) configTextarea.value = newYaml;
       await populateModels();
     });
     modelDropdown.addEventListener("change", () => {
       this.blockSettings.yamlConfig.model = modelDropdown.value;
       const newYaml = this.manager.generateYamlFromConfig(this.blockSettings.yamlConfig);
-      this.manager.updateFileBlock(this.el, this.ctx, promptInput.innerText.trim(), newYaml);
+      this.manager.updateFileBlock(this.el, this.ctx, promptInput.value.trim(), newYaml);
       if (configTextarea) configTextarea.value = newYaml;
     });
     if (copyButton) {
       copyButton.addEventListener("click", async () => {
-        const text = promptInput.innerText.trim();
+        const text = promptInput.value.trim();
         if (text) {
           await navigator.clipboard.writeText(text);
           new obsidian.Notice("Prompt copied to clipboard");
@@ -598,7 +766,7 @@ class OllamaBlockView {
     }
     if (clearButton) {
       clearButton.addEventListener("click", () => {
-        promptInput.innerText = "";
+        promptInput.value = "";
         updateSubmitButtonState();
         const yaml = this.blockSettings.hasYaml ? configTextarea.value : "";
         this.manager.updateFileBlock(this.el, this.ctx, "", yaml);
@@ -612,13 +780,13 @@ class OllamaBlockView {
         advancedButton.style.background = isHidden ? "var(--background-modifier-active-hover)" : "transparent";
       });
       configTextarea.addEventListener("blur", () => {
-        this.manager.updateFileBlock(this.el, this.ctx, promptInput.innerText.trim(), configTextarea.value.trim());
+        this.manager.updateFileBlock(this.el, this.ctx, promptInput.value.trim(), configTextarea.value.trim());
       });
     }
     const updateResponseCount = this.debounce((val) => {
       this.blockSettings.yamlConfig.num_responses = val;
       const newYaml = this.manager.generateYamlFromConfig(this.blockSettings.yamlConfig);
-      this.manager.updateFileBlock(this.el, this.ctx, promptInput.innerText.trim(), newYaml);
+      this.manager.updateFileBlock(this.el, this.ctx, promptInput.value.trim(), newYaml);
       if (configTextarea) configTextarea.value = newYaml;
     }, 1e3);
     responsesSlider.addEventListener("input", () => {
@@ -634,7 +802,7 @@ class OllamaBlockView {
         abortController == null ? void 0 : abortController.abort();
         return;
       }
-      const prompt = promptInput.innerText.trim();
+      const prompt = promptInput.value.trim();
       if (!prompt) return;
       isGenerating = true;
       updateSubmitButtonState();
@@ -645,7 +813,7 @@ class OllamaBlockView {
       const providerId = providerDropdown.value;
       const provider = this.service.getProvider(providerId);
       try {
-        for (let i = 0; i < count; i++) {
+        const runGeneration = async (index) => {
           const item = responsesWrapper.createDiv({ cls: "ollama-response-item" });
           item.style.cssText = "background: var(--background-primary); border: 1px solid var(--background-modifier-border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; position: relative; min-height: 42px;";
           const content = item.createDiv();
@@ -712,10 +880,27 @@ class OllamaBlockView {
               }
             });
           } catch (e) {
-            if (e.name === "AbortError") break;
+            if (e.name === "AbortError") return;
             content.createDiv({ text: `Error: ${e.message}` }).style.color = "var(--text-error)";
-            break;
+            throw e;
           }
+        };
+        try {
+          if (count > 0) {
+            await runGeneration(0);
+          }
+          if (count > 1) {
+            const remainingIndices = Array.from({ length: count - 1 }, (_, i) => i + 1);
+            if (providerId === "ollama") {
+              for (const idx of remainingIndices) {
+                await runGeneration(idx);
+              }
+            } else {
+              await Promise.all(remainingIndices.map((idx) => runGeneration(idx)));
+            }
+          }
+        } catch (e) {
+          console.error(`[${providerId}] Generation batch failed/stopped:`, e);
         }
       } finally {
         isGenerating = false;
@@ -725,7 +910,7 @@ class OllamaBlockView {
     submitButton.addEventListener("click", startGeneration);
     const manualSave = async () => {
       const yaml = this.blockSettings.hasYaml ? configTextarea.value : "";
-      await this.manager.updateFileBlock(this.el, this.ctx, promptInput.innerText.trim(), yaml);
+      await this.manager.updateFileBlock(this.el, this.ctx, promptInput.value.trim(), yaml);
       new obsidian.Notice("Saved");
     };
     saveButton.addEventListener("click", manualSave);
@@ -734,7 +919,7 @@ class OllamaBlockView {
     });
     promptInput.addEventListener("blur", () => {
       const yaml = this.blockSettings.hasYaml ? configTextarea.value : "";
-      this.manager.updateFileBlock(this.el, this.ctx, promptInput.innerText.trim(), yaml);
+      this.manager.updateFileBlock(this.el, this.ctx, promptInput.value.trim(), yaml);
     });
     promptInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
@@ -749,16 +934,9 @@ class OllamaBlockView {
     const trackFocus = () => {
       const section = this.ctx.getSectionInfo(this.el);
       if (!section) return;
-      const selection = window.getSelection();
-      if (!selection || selection.rangeCount === 0) return;
-      const range = selection.getRangeAt(0);
-      const preRange = range.cloneRange();
-      preRange.selectNodeContents(promptInput);
-      preRange.setEnd(range.startContainer, range.startOffset);
-      const offset = preRange.toString().length;
       this.manager.sessionFocus = {
         lineStart: section.lineStart,
-        ch: offset,
+        ch: promptInput.selectionStart,
         file: this.ctx.sourcePath
       };
     };
@@ -773,39 +951,7 @@ class OllamaBlockView {
     if (section && focus.lineStart === section.lineStart && focus.file === this.ctx.sourcePath) {
       promptInput.focus();
       if (focus.ch !== null) {
-        const selection = window.getSelection();
-        const range = document.createRange();
-        let currentOffset = 0;
-        let targetNode = null;
-        let targetOffset = 0;
-        const findNode = (node) => {
-          if (node.nodeType === Node.TEXT_NODE) {
-            const len = node.length;
-            if (currentOffset + len >= focus.ch) {
-              targetNode = node;
-              targetOffset = focus.ch - currentOffset;
-              return true;
-            }
-            currentOffset += len;
-          } else {
-            for (let i = 0; i < node.childNodes.length; i++) {
-              if (findNode(node.childNodes[i])) return true;
-            }
-          }
-          return false;
-        };
-        findNode(promptInput);
-        if (targetNode) {
-          range.setStart(targetNode, targetOffset);
-          range.collapse(true);
-          selection == null ? void 0 : selection.removeAllRanges();
-          selection == null ? void 0 : selection.addRange(range);
-        } else {
-          range.selectNodeContents(promptInput);
-          range.collapse(false);
-          selection == null ? void 0 : selection.removeAllRanges();
-          selection == null ? void 0 : selection.addRange(range);
-        }
+        promptInput.setSelectionRange(focus.ch, focus.ch);
       }
     }
   }
@@ -846,6 +992,45 @@ class LLMSettingTab extends obsidian.PluginSettingTab {
       };
       this.renderGenericSettings(containerEl, activeProvider, providerNames[activeProvider]);
     }
+    containerEl.createEl("hr");
+    this.renderSecuritySettings(containerEl);
+  }
+  async renderSecuritySettings(containerEl) {
+    containerEl.createEl("h3", { text: "🔐 Security & Secrets (.env)" });
+    containerEl.createEl("p", {
+      text: "You can securely store your API keys in a .env file. Keys stored here will NOT be saved to your public data.json file, making it safe to share your vault or push to Git.",
+      cls: "setting-item-description"
+    });
+    const envPath = `${this.plugin.manifest.dir}/.env`;
+    let envContent = "";
+    try {
+      if (await this.app.vault.adapter.exists(envPath)) {
+        envContent = await this.app.vault.adapter.read(envPath);
+      }
+    } catch (e) {
+    }
+    const envSetting = new obsidian.Setting(containerEl).setName(".env File Content").setDesc("Enter your keys in KEY=VALUE format. After saving, restart the plugin to apply changes.").setClass("ai-tester-env-editor");
+    envSetting.addTextArea((text) => {
+      text.setPlaceholder("OPENAI_API_KEY=sk-...\nGEMINI_API_KEY=...").setValue(envContent);
+      text.inputEl.style.width = "100%";
+      text.inputEl.style.height = "150px";
+      text.inputEl.style.fontFamily = "var(--font-monospace)";
+      const saveBtn = containerEl.createEl("button", {
+        text: "Save .env & Apply",
+        cls: "mod-cta"
+      });
+      saveBtn.style.marginTop = "10px";
+      saveBtn.onclick = async () => {
+        try {
+          await this.app.vault.adapter.write(envPath, text.getValue());
+          new obsidian.Notice(".env 파일이 저장되었습니다. 설정을 적용하기 위해 플러그인을 다시 불러옵니다.");
+          await this.plugin.loadSettings();
+          this.display();
+        } catch (e) {
+          new obsidian.Notice("저장 실패: " + e.message);
+        }
+      };
+    });
   }
   renderOllamaSettings(containerEl) {
     containerEl.createEl("h3", { text: "Ollama Settings" });
@@ -859,9 +1044,12 @@ class LLMSettingTab extends obsidian.PluginSettingTab {
         const provider = this.plugin.llmService.getProvider("ollama");
         const response = await provider.fetchModels();
         dropdown.selectEl.innerHTML = "";
-        response.models.forEach((m) => {
-          dropdown.addOption(m.id, m.name);
-        });
+        if (response.models.length > 0) {
+          const group = dropdown.selectEl.createEl("optgroup", { attr: { label: "🏠 Local Models" } });
+          response.models.forEach((m) => {
+            group.createEl("option", { value: m.id, text: m.name });
+          });
+        }
         dropdown.setValue(this.plugin.settings.ollama.model);
       } catch (e) {
         dropdown.addOption("", "Could not load models");
@@ -875,23 +1063,47 @@ class LLMSettingTab extends obsidian.PluginSettingTab {
   renderGenericSettings(containerEl, providerId, name) {
     containerEl.createEl("h3", { text: `${name} Settings` });
     const settings = this.plugin.settings[providerId];
-    new obsidian.Setting(containerEl).setName("API Key").setDesc(`Your ${name} API key`).addText((text) => text.setPlaceholder("API Key").setValue(settings.apiKey).onChange(async (value) => {
-      settings.apiKey = value;
-      await this.plugin.saveSettings();
-    }).inputEl.type = "password");
+    const isEnvKey = this.plugin.envKeys.has(providerId);
+    new obsidian.Setting(containerEl).setName("API Key").setDesc(isEnvKey ? `Your ${name} API key is secured via .env file.` : `Your ${name} API key`).addText((text) => {
+      text.setPlaceholder(isEnvKey ? "🔒 Secret Locked (from .env)" : "API Key").setValue(settings.apiKey).onChange(async (value) => {
+        if (isEnvKey) return;
+        settings.apiKey = value;
+        await this.plugin.saveSettings();
+      });
+      text.inputEl.type = "password";
+      if (isEnvKey) {
+        text.setDisabled(true);
+        text.inputEl.style.opacity = "0.5";
+      }
+      text.inputEl.addEventListener("blur", () => {
+        if (settings.apiKey) this.display();
+      });
+    });
     new obsidian.Setting(containerEl).setName("Base URL").setDesc("Custom endpoint URL").addText((text) => text.setPlaceholder("https://...").setValue(settings.baseUrl).onChange(async (value) => {
       settings.baseUrl = value;
       await this.plugin.saveSettings();
     }));
-    new obsidian.Setting(containerEl).setName("Default Model").setDesc(`Default model for ${name}`).addDropdown(async (dropdown) => {
+    const modelSetting = new obsidian.Setting(containerEl).setName("Default Model").setDesc(`Select or refresh models for ${name}`);
+    modelSetting.addDropdown(async (dropdown) => {
       dropdown.addOption("", "Loading models...");
       try {
         const provider = this.plugin.llmService.getProvider(providerId);
         const response = await provider.fetchModels();
         dropdown.selectEl.innerHTML = "";
-        response.models.forEach((m) => {
-          dropdown.addOption(m.id, m.name);
-        });
+        const recommendedModels = response.models.filter((m) => m.category === "Recommended");
+        const otherModels = response.models.filter((m) => m.category === "Others" || !m.category);
+        if (recommendedModels.length > 0) {
+          const group = dropdown.selectEl.createEl("optgroup", { attr: { label: "⭐ Recommended" } });
+          recommendedModels.forEach((m) => {
+            group.createEl("option", { value: m.id, text: m.name });
+          });
+        }
+        if (otherModels.length > 0) {
+          const group = dropdown.selectEl.createEl("optgroup", { attr: { label: "📦 Others (Legacy/Experimental)" } });
+          otherModels.forEach((m) => {
+            group.createEl("option", { value: m.id, text: m.id });
+          });
+        }
         dropdown.setValue(settings.model);
       } catch (e) {
         dropdown.addOption("", "Could not load models");
@@ -899,14 +1111,24 @@ class LLMSettingTab extends obsidian.PluginSettingTab {
       dropdown.onChange(async (value) => {
         settings.model = value;
         await this.plugin.saveSettings();
+        this.display();
       });
     });
+    modelSetting.addButton((btn) => btn.setButtonText("Refresh Models").setTooltip("Fetch latest models from API").onClick(() => {
+      new obsidian.Notice("모델 목록을 새로고침하는 중...");
+      this.display();
+    }));
+    new obsidian.Setting(containerEl).setName("Custom Model ID").setDesc("Enter a specific model ID manually if not in the list").addText((text) => text.setPlaceholder("e.g. gpt-4o-2024-11-20").setValue(settings.model).onChange(async (value) => {
+      settings.model = value;
+      await this.plugin.saveSettings();
+    }));
   }
 }
 class AITesterPlugin extends obsidian.Plugin {
   constructor() {
     super(...arguments);
     this.settings = DEFAULT_SETTINGS;
+    this.envKeys = /* @__PURE__ */ new Set();
   }
   async onload() {
     console.log("AI Tester plugin loading...");
@@ -926,7 +1148,53 @@ class AITesterPlugin extends obsidian.Plugin {
   async loadSettings() {
     var _a, _b;
     const loadedData = await this.loadData();
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, loadedData);
+    this.settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
+    if (loadedData) {
+      Object.assign(this.settings, loadedData);
+      const providers = ["ollama", "openai", "gemini", "grok", "glm", "kimi"];
+      providers.forEach((p) => {
+        if (loadedData[p]) {
+          this.settings[p] = Object.assign({}, DEFAULT_SETTINGS[p], loadedData[p]);
+        }
+      });
+    }
+    this.envKeys.clear();
+    try {
+      const envPath = `${this.manifest.dir}/.env`;
+      if (await this.app.vault.adapter.exists(envPath)) {
+        const envContent = await this.app.vault.adapter.read(envPath);
+        const envLines = envContent.split("\n");
+        envLines.forEach((line) => {
+          const [key, value] = line.split("=").map((s) => s.trim());
+          if (!key || !value) return;
+          switch (key.toUpperCase()) {
+            case "OPENAI_API_KEY":
+              this.settings.openai.apiKey = value;
+              this.envKeys.add("openai");
+              break;
+            case "GEMINI_API_KEY":
+              this.settings.gemini.apiKey = value;
+              this.envKeys.add("gemini");
+              break;
+            case "GROK_API_KEY":
+              this.settings.grok.apiKey = value;
+              this.envKeys.add("grok");
+              break;
+            case "GLM_API_KEY":
+              this.settings.glm.apiKey = value;
+              this.envKeys.add("glm");
+              break;
+            case "KIMI_API_KEY":
+              this.settings.kimi.apiKey = value;
+              this.envKeys.add("kimi");
+              break;
+          }
+        });
+        console.log("API Keys loaded from .env file successfully.");
+      }
+    } catch (e) {
+      console.error("Failed to load .env file:", e);
+    }
     if (loadedData && (loadedData.model || loadedData.serverUrl)) {
       if (loadedData.model && !((_a = loadedData.ollama) == null ? void 0 : _a.model)) {
         this.settings.ollama.model = loadedData.model;
@@ -938,10 +1206,12 @@ class AITesterPlugin extends obsidian.Plugin {
     }
   }
   async saveSettings() {
-    const sanitizedSettings = {};
-    const validKeys = Object.keys(DEFAULT_SETTINGS);
-    validKeys.forEach((key) => {
-      sanitizedSettings[key] = this.settings[key];
+    const sanitizedSettings = JSON.parse(JSON.stringify(this.settings));
+    const targetProviders = ["openai", "gemini", "grok", "glm", "kimi"];
+    targetProviders.forEach((p) => {
+      if (sanitizedSettings[p]) {
+        delete sanitizedSettings[p].apiKey;
+      }
     });
     await this.saveData(sanitizedSettings);
     this.llmService.updateSettings(this.settings);

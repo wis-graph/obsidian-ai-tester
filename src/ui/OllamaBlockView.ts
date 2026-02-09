@@ -76,9 +76,23 @@ export class OllamaBlockView {
         const promptContainer = container.createDiv({ cls: 'ollama-prompt-container' });
         promptContainer.style.cssText = 'position: relative; width: 100%; margin-bottom: 12px;';
 
-        const promptInput = promptContainer.createEl('div', { cls: 'ollama-prompt-input', attr: { contenteditable: 'true', 'data-placeholder': 'Enter prompt...' } });
-        promptInput.innerHTML = this.blockSettings.prompt;
-        promptInput.style.cssText = 'width: 100%; padding: 12px; padding-bottom: 45px; border: 1px solid var(--background-modifier-border); border-radius: 8px; background: var(--background-primary); color: var(--text-normal); overflow: auto; min-height: 100px; white-space: pre-wrap; word-wrap: break-word; outline: none; transition: border-color 0.2s;';
+        const promptInput = promptContainer.createEl('textarea', { cls: 'ollama-prompt-input', attr: { placeholder: 'Enter prompt...' } });
+        promptInput.value = this.blockSettings.prompt;
+        promptInput.style.cssText = 'width: 100%; padding: 12px; padding-bottom: 45px; border: 1px solid var(--background-modifier-border); border-radius: 8px; background: var(--background-primary); color: var(--text-normal); overflow: hidden; min-height: 100px; white-space: pre-wrap; word-wrap: break-word; outline: none; transition: border-color 0.2s; resize: none; display: block; height: auto;';
+
+        const adjustHeight = () => {
+            promptInput.style.height = 'auto';
+            const newHeight = Math.max(100, promptInput.scrollHeight);
+            promptInput.style.height = newHeight + 'px';
+        };
+
+        promptInput.addEventListener('input', () => {
+            adjustHeight();
+        });
+
+        // Initial adjustment after a short delay to ensure rendering
+        setTimeout(adjustHeight, 0);
+
         promptInput.addEventListener('focus', () => promptInput.style.borderColor = 'var(--interactive-accent)');
         promptInput.addEventListener('blur', () => promptInput.style.borderColor = 'var(--background-modifier-border)');
 
@@ -176,7 +190,7 @@ export class OllamaBlockView {
         let isGenerating = false;
 
         const updateSubmitButtonState = () => {
-            const hasContent = promptInput.innerText.trim().length > 0;
+            const hasContent = promptInput.value.trim().length > 0;
             if (isGenerating) {
                 submitButton.disabled = false;
                 submitButton.style.opacity = '1';
@@ -212,7 +226,14 @@ export class OllamaBlockView {
                 });
 
                 const savedModel = this.blockSettings.yamlConfig.model;
-                const defaultModel = providerId === 'ollama' ? this.service.getSettings().ollama.model : this.service.getSettings().openai.model;
+                const settings = this.service.getSettings();
+                let defaultModel = '';
+
+                if (providerId === 'ollama') {
+                    defaultModel = settings.ollama.model;
+                } else if (providerId in settings) {
+                    defaultModel = (settings as any)[providerId].model;
+                }
 
                 modelDropdown.value = savedModel || defaultModel;
             } catch (e) {
@@ -228,7 +249,7 @@ export class OllamaBlockView {
             this.blockSettings.yamlConfig.model = ''; // Reset model on provider change
 
             const newYaml = this.manager.generateYamlFromConfig(this.blockSettings.yamlConfig);
-            this.manager.updateFileBlock(this.el, this.ctx, promptInput.innerText.trim(), newYaml);
+            this.manager.updateFileBlock(this.el, this.ctx, promptInput.value.trim(), newYaml);
             if (configTextarea) configTextarea.value = newYaml;
 
             await populateModels();
@@ -237,13 +258,13 @@ export class OllamaBlockView {
         modelDropdown.addEventListener('change', () => {
             this.blockSettings.yamlConfig.model = modelDropdown.value;
             const newYaml = this.manager.generateYamlFromConfig(this.blockSettings.yamlConfig);
-            this.manager.updateFileBlock(this.el, this.ctx, promptInput.innerText.trim(), newYaml);
+            this.manager.updateFileBlock(this.el, this.ctx, promptInput.value.trim(), newYaml);
             if (configTextarea) configTextarea.value = newYaml;
         });
 
         if (copyButton) {
             copyButton.addEventListener('click', async () => {
-                const text = promptInput.innerText.trim();
+                const text = promptInput.value.trim();
                 if (text) {
                     await navigator.clipboard.writeText(text);
                     new Notice('Prompt copied to clipboard');
@@ -253,7 +274,7 @@ export class OllamaBlockView {
 
         if (clearButton) {
             clearButton.addEventListener('click', () => {
-                promptInput.innerText = '';
+                promptInput.value = '';
                 updateSubmitButtonState();
                 const yaml = this.blockSettings.hasYaml ? configTextarea.value : '';
                 this.manager.updateFileBlock(this.el, this.ctx, '', yaml);
@@ -268,14 +289,14 @@ export class OllamaBlockView {
                 advancedButton.style.background = isHidden ? 'var(--background-modifier-active-hover)' : 'transparent';
             });
             configTextarea.addEventListener('blur', () => {
-                this.manager.updateFileBlock(this.el, this.ctx, promptInput.innerText.trim(), configTextarea.value.trim());
+                this.manager.updateFileBlock(this.el, this.ctx, promptInput.value.trim(), configTextarea.value.trim());
             });
         }
 
         const updateResponseCount = this.debounce((val: number) => {
             this.blockSettings.yamlConfig.num_responses = val;
             const newYaml = this.manager.generateYamlFromConfig(this.blockSettings.yamlConfig);
-            this.manager.updateFileBlock(this.el, this.ctx, promptInput.innerText.trim(), newYaml);
+            this.manager.updateFileBlock(this.el, this.ctx, promptInput.value.trim(), newYaml);
             if (configTextarea) configTextarea.value = newYaml;
         }, 1000);
 
@@ -294,7 +315,7 @@ export class OllamaBlockView {
                 return;
             }
 
-            const prompt = promptInput.innerText.trim();
+            const prompt = promptInput.value.trim();
             if (!prompt) return;
 
             isGenerating = true;
@@ -309,7 +330,7 @@ export class OllamaBlockView {
             const provider = this.service.getProvider(providerId);
 
             try {
-                for (let i = 0; i < count; i++) {
+                const runGeneration = async (index: number) => {
                     const item = responsesWrapper.createDiv({ cls: 'ollama-response-item' });
                     item.style.cssText = 'background: var(--background-primary); border: 1px solid var(--background-modifier-border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; position: relative; min-height: 42px;';
 
@@ -364,7 +385,7 @@ export class OllamaBlockView {
 
                     try {
                         let statsShown = false;
-                        await provider.streamResponse(prompt, modelDropdown.value, this.blockSettings.yamlConfig, abortController, (chunk) => {
+                        await provider.streamResponse(prompt, modelDropdown.value, this.blockSettings.yamlConfig, abortController!, (chunk) => {
                             outputPre.textContent += chunk;
                         }, (final) => {
                             if (final.total_duration && !statsShown) {
@@ -375,10 +396,35 @@ export class OllamaBlockView {
                             }
                         });
                     } catch (e) {
-                        if (e.name === 'AbortError') break;
+                        if (e.name === 'AbortError') return;
                         content.createDiv({ text: `Error: ${e.message}` }).style.color = 'var(--text-error)';
-                        break;
+                        throw e; // Rethrow to stop parallel batch if first fails
                     }
+                };
+
+                try {
+                    // 1. 선발대 (First Request): Always sequential to check for errors early
+                    if (count > 0) {
+                        await runGeneration(0);
+                    }
+
+                    // 2. 후발대 (Remaining Requests): Parallel for cloud, Sequential for local
+                    if (count > 1) {
+                        const remainingIndices = Array.from({ length: count - 1 }, (_, i) => i + 1);
+
+                        if (providerId === 'ollama') {
+                            // Ollama is usually local, sequential is safer for GPU/RAM
+                            for (const idx of remainingIndices) {
+                                await runGeneration(idx);
+                            }
+                        } else {
+                            // Cloud APIs: Run in parallel for speed
+                            await Promise.all(remainingIndices.map(idx => runGeneration(idx)));
+                        }
+                    }
+                } catch (e) {
+                    // First fails or any parallel failure stops the sequence (AbortError handled inside runGeneration)
+                    console.error(`[${providerId}] Generation batch failed/stopped:`, e);
                 }
             } finally {
                 isGenerating = false;
@@ -390,7 +436,7 @@ export class OllamaBlockView {
 
         const manualSave = async () => {
             const yaml = this.blockSettings.hasYaml ? configTextarea.value : '';
-            await this.manager.updateFileBlock(this.el, this.ctx, promptInput.innerText.trim(), yaml);
+            await this.manager.updateFileBlock(this.el, this.ctx, promptInput.value.trim(), yaml);
             new Notice('Saved');
         };
 
@@ -402,7 +448,7 @@ export class OllamaBlockView {
 
         promptInput.addEventListener('blur', () => {
             const yaml = this.blockSettings.hasYaml ? configTextarea.value : '';
-            this.manager.updateFileBlock(this.el, this.ctx, promptInput.innerText.trim(), yaml);
+            this.manager.updateFileBlock(this.el, this.ctx, promptInput.value.trim(), yaml);
         });
 
         promptInput.addEventListener('keydown', (e: KeyboardEvent) => {
@@ -421,18 +467,9 @@ export class OllamaBlockView {
             const section = this.ctx.getSectionInfo(this.el);
             if (!section) return;
 
-            const selection = window.getSelection();
-            if (!selection || selection.rangeCount === 0) return;
-
-            const range = selection.getRangeAt(0);
-            const preRange = range.cloneRange();
-            preRange.selectNodeContents(promptInput);
-            preRange.setEnd(range.startContainer, range.startOffset);
-            const offset = preRange.toString().length;
-
             this.manager.sessionFocus = {
                 lineStart: section.lineStart,
-                ch: offset,
+                ch: promptInput.selectionStart,
                 file: this.ctx.sourcePath
             };
         };
@@ -450,44 +487,7 @@ export class OllamaBlockView {
         if (section && focus.lineStart === section.lineStart && focus.file === this.ctx.sourcePath) {
             promptInput.focus();
             if (focus.ch !== null) {
-                const selection = window.getSelection();
-                const range = document.createRange();
-
-                let currentOffset = 0;
-                let targetNode: Node | null = null;
-                let targetOffset = 0;
-
-                const findNode = (node: Node) => {
-                    if (node.nodeType === Node.TEXT_NODE) {
-                        const len = (node as Text).length;
-                        if (currentOffset + len >= (focus.ch as number)) {
-                            targetNode = node;
-                            targetOffset = (focus.ch as number) - currentOffset;
-                            return true;
-                        }
-                        currentOffset += len;
-                    } else {
-                        for (let i = 0; i < node.childNodes.length; i++) {
-                            if (findNode(node.childNodes[i])) return true;
-                        }
-                    }
-                    return false;
-                };
-
-                findNode(promptInput);
-
-                if (targetNode) {
-                    range.setStart(targetNode, targetOffset);
-                    range.collapse(true);
-                    selection?.removeAllRanges();
-                    selection?.addRange(range);
-                } else {
-                    // Fallback to end
-                    range.selectNodeContents(promptInput);
-                    range.collapse(false);
-                    selection?.removeAllRanges();
-                    selection?.addRange(range);
-                }
+                promptInput.setSelectionRange(focus.ch, focus.ch);
             }
         }
     }

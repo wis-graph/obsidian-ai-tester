@@ -30,22 +30,22 @@ export const DEFAULT_SETTINGS: LLMSettings = {
 	openai: {
 		apiKey: '',
 		baseUrl: 'https://api.openai.com/v1',
-		model: 'gpt-5.2'
+		model: 'gpt-4o'
 	},
 	gemini: {
 		apiKey: '',
 		baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
-		model: 'gemini-3-pro'
+		model: 'gemini-1.5-flash'
 	},
 	grok: {
 		apiKey: '',
 		baseUrl: 'https://api.x.ai/v1',
-		model: 'grok-4.1'
+		model: 'grok-beta'
 	},
 	glm: {
 		apiKey: '',
 		baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
-		model: 'glm-4.7'
+		model: 'glm-4-flash'
 	},
 	kimi: {
 		apiKey: '',
@@ -57,6 +57,7 @@ export const DEFAULT_SETTINGS: LLMSettings = {
 export interface LLMModel {
 	id: string;
 	name: string;
+	category?: 'Recommended' | 'Others';
 }
 
 export interface LLMListResponse {
